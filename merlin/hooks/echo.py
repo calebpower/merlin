@@ -1,5 +1,5 @@
 import logging
-from src.hooks.base import BaseHook
+from merlin.hooks.base import BaseHook
 
 logger = logging.getLogger(__name__)
 

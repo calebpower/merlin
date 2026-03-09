@@ -1,4 +1,4 @@
-from src.hooks.base import BaseHook
+from merlin.hooks.base import BaseHook
 
 class Hook(BaseHook):
     async def on_state_change(self, key: str, old_value, new_value):

@@ -3,7 +3,7 @@ import tomllib
 import importlib
 import logging
 import aiomqtt
-from src.state import GlobalState
+from merlin.state import GlobalState
 
 logging.basicConfig(
     level=logging.INFO,
@@ -11,7 +11,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-async def main():
+async def async_main():
     # load configuration
     with open("config.toml", "rb") as f:
         config = tomllib.load(f)
@@ -51,8 +51,11 @@ async def main():
             for h in hooks:
                 asyncio.create_task(h.on_mqtt_message(topic, payload))
 
-if __name__ == "__main__":
+def main():
     try:
-        asyncio.run(main())
+        asyncio.run(async_main())
     except KeyboardInterrupt:
         logger.info("shutting down")
+                
+if __name__ == "__main__":
+    main()

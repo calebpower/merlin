@@ -3,7 +3,10 @@ name = "merlin"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "aiomqtt>=2.5.1",
 ]
+
+[project.scripts]
+merlin = "merlin.main:main"
