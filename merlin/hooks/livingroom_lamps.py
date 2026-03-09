@@ -9,6 +9,7 @@ class Hook(BaseHook):
         super().__init__(state, mqtt_client, config)
         self.lamp1_state = "OFF"
         self.lamp2_state = "OFF"
+        logger.info("hook 'livingroom_lamps' loaded")
 
     async def on_mqtt_message(self, topic: str, payload: str):
         # track individual lamp states
@@ -17,10 +18,12 @@ class Hook(BaseHook):
                 data = json.loads(payload)
                 if "state" in data:
                     self.lamp1_state = data["state"]
+                    logger.info("detected updated state for living room lamp no. 1: %s", self.lamp1_state)
             elif topic == "zigbee2mqtt/home/living_room/plug/lamp_2":
                 data = json.loads(payload)
                 if "state" in data:
                     self.lamp2_state = data["state"]
+                    logger.info("detected updated state for living room lamp no. 2: %s", self.lamp2_state)
         except json.JSONDecodeError:
             pass
 
