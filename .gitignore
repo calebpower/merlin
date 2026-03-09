@@ -1,0 +1,36 @@
+# Python & uv
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+wheels/
+*.egg-info/
+.venv/
+.pytest_cache/
+.tox/
+.uv/
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# nano
+.nano_history
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Linux / FreeBSD
+*~
+core
+
+# project
+config.toml

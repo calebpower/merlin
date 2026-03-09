@@ -1,0 +1,11 @@
+[mqtt]
+broker = "localhost"
+port = 1883
+
+[[hooks]]
+name = "echo_hook"
+module = "src.hooks.echo"
+
+[[hooks]]
+name = "state_monitor_hook"
+module = "src.hooks.state_monitor"
