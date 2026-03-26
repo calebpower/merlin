@@ -2,6 +2,11 @@
 broker = "localhost"
 port = 1883
 
+[api]
+host = "0.0.0.0"
+port = 8080
+db_path = "merlin.db"
+
 [[hooks]]
 name = "echo_hook"
 module = "merlin.hooks.echo"
@@ -9,3 +14,10 @@ module = "merlin.hooks.echo"
 [[hooks]]
 name = "state_monitor_hook"
 module = "merlin.hooks.state_monitor"
+
+[[runners]]
+name = "weather_poller"
+module = "merlin.runners.weather"
+interval = 300
+endpoint = "https://api.weather.com/v1"
+api_key = "custom_secret_key"

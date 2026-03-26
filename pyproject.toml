@@ -1,11 +1,14 @@
 [project]
 name = "merlin"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "A granular home automation platform."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "aiohttp>=3.9.0",
     "aiomqtt>=2.5.1",
+    "aiosqlite>=0.20.0",
+    "pysqlite3>=0.5.2"
 ]
 
 [project.scripts]

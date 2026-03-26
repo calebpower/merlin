@@ -11,7 +11,7 @@ class Hook(BaseHook):
         self.lamp2_state = "OFF"
         logger.info("hook 'livingroom_lamps' loaded")
 
-    async def on_mqtt_message(self, topic: str, payload: str):
+    async def on_message(self, topic: str, payload: str):
         # track individual lamp states
         try:
             if topic == "zigbee2mqtt/home/living_room/plug/lamp_1":
