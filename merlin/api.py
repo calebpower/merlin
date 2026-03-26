@@ -8,11 +8,15 @@ except ImportError:
 import json
 import asyncio
 import aiosqlite
+import logging
 from aiohttp import web
+
+logger = logging.getLogger(__name__)
 
 async def snitch_handler(request):
     try:
         data = await request.json()
+        logger.info(data)
         challenge = data.get("challenge")
         status = data.get("status")
 
@@ -26,8 +30,9 @@ async def snitch_handler(request):
                         payload_str = status if isinstance(status, str) else json.dumps(status)
                         for h in request.app["hooks"]:
                             asyncio.create_task(h.on_message(topic, payload_str))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"exception at /snitch: {e}")
+    
     return web.Response(text="OK", status=200)
 
 async def start_api(hooks, host="0.0.0.0", port=8080, db_path="merlin.db"):

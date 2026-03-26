@@ -28,7 +28,7 @@ class Hook(BaseHook):
             pass
 
     async def on_state_change(self, key: str, old_value, new_value):
-        if key == "livingroom_button_single_ts":
+        if key == "livingroom_button_single_ts" or key == "livingroom_button_double_ts":
             # turn off only if both are currently on; otherwise default to on
             if self.lamp1_state == "ON" and self.lamp2_state == "ON":
                 target_state = "OFF"
