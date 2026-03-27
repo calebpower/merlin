@@ -13,6 +13,7 @@ import logging
 import uuid
 import aiomqtt
 import aiosqlite
+import signal
 from merlin.api import start_api
 from merlin.state import GlobalState
 

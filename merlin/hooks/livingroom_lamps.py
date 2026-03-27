@@ -11,6 +11,15 @@ class Hook(BaseHook):
         self.lamp2_state = "OFF"
         logger.info("hook 'livingroom_lamps' loaded")
 
+    async def _toggle_lamps(target_state=None):
+        if target_state == None:
+            target_state = "OFF" if self.lamp1_state == "ON" and self.lamp2_state == "ON" else "ON"
+        logger.info("livingroom lamps toggled %s", target_state)
+        await self.mqtt.publish(
+            "zigbee2mqtt/living_room_lamps/set",
+            payload=json.dumps({"state": target_state})
+        )
+
     async def on_message(self, topic: str, payload: str):
         # track individual lamp states
         try:
@@ -29,15 +38,7 @@ class Hook(BaseHook):
 
     async def on_state_change(self, key: str, old_value, new_value):
         if key == "livingroom_button_single_ts" or key == "livingroom_button_double_ts":
-            # turn off only if both are currently on; otherwise default to on
-            if self.lamp1_state == "ON" and self.lamp2_state == "ON":
-                target_state = "OFF"
-            else:
-                target_state = "ON"
+            _toggle_lamps()
 
-            logger.info("livingroom lamps toggled %s", target_state)
-
-            await self.mqtt.publish(
-                "zigbee2mqtt/living_room_lamps/set",
-                payload=json.dumps({"state": target_state})
-            )
+        elif key == "user:at_home":
+            _toggle_lamps("OFF")
