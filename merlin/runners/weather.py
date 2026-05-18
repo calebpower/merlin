@@ -1,6 +1,7 @@
 import aiohttp
 import logging
 from merlin.runners.base import BaseRunner
+from merlin.state import StateKey
 
 logger = logging.getLogger(__name__)
 
@@ -16,5 +17,5 @@ class Runner(BaseRunner):
                 data = await response.json()
                 
                 # update state
-                await self.state.set("weather_temp", data["temp"])
+                await self.state.set(StateKey.WEATHER_TEMP, data["temp"])
                 logger.info("updated weather_temp state")

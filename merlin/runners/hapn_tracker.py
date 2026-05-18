@@ -2,6 +2,7 @@ import aiohttp
 import logging
 from datetime import datetime, timedelta
 from merlin.runners.base import BaseRunner
+from merlin.state import StateKey
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ class Runner(BaseRunner):
                             "mileage": result.get("odoMileage"),
                             "speed": result.get("speed")
                         }
-                        await self.state.set("hapn_device_state", hook_payload)
+                        await self.state.set(StateKey.HAPN_DEVICE_STATE, hook_payload)
 
                         logger.info("updated vehicle tracking state")
 

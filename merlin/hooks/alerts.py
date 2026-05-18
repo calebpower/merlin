@@ -2,6 +2,7 @@ import aiohttp
 import json
 import logging
 from merlin.hooks.base import BaseHook
+from merlin.state import StateKey
 
 logger = logging.getLogger(__name__)
 
@@ -10,7 +11,7 @@ class Hook(BaseHook):
         super().__init__(state, mqtt_client, config)
         self.discord_webhook = self.config.get("discord_webhook")
 
-    async def _msg_discord(msg: str):
+    async def _msg_discord(self, msg: str):
         logger.info(f"dispatching message: {msg}")
         
         async with aiohttp.ClientSession() as session:
@@ -21,5 +22,5 @@ class Hook(BaseHook):
                     logger.error(f"discord dispatch returned error {response.status}")
 
     async def on_state_change(self, key: str, old_value, new_value):
-        if key == "vehicle:safe" and new_value == False:
-            _msg_discord(":warning: Vehicle has gone AWOL")
+        if key == StateKey.VEHICLE_SAFE and new_value is False:
+            await self._msg_discord(":warning: Vehicle has gone AWOL")

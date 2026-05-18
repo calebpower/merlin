@@ -10,15 +10,24 @@ import asyncio
 import aiosqlite
 import logging
 from aiohttp import web
+from pydantic import BaseModel
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+class WebhookPayload(BaseModel):
+    challenge: str
+    status: Any
+
+bg_tasks = set()
 
 async def snitch_handler(request):
     try:
         data = await request.json()
         logger.info(data)
-        challenge = data.get("challenge")
-        status = data.get("status")
+        payload = WebhookPayload.model_validate(data)
+        challenge = payload.challenge
+        status = payload.status
 
         if challenge and status is not None:
             db_path = request.app.get("db_path", "merlin.db")
@@ -29,7 +38,9 @@ async def snitch_handler(request):
                         topic = row[0]
                         payload_str = status if isinstance(status, str) else json.dumps(status)
                         for h in request.app["hooks"]:
-                            asyncio.create_task(h.on_message(topic, payload_str))
+                            task = asyncio.create_task(h.on_message(topic, payload_str))
+                            bg_tasks.add(task)
+                            task.add_done_callback(bg_tasks.discard)
     except Exception as e:
         logger.error(f"exception at /snitch: {e}")
     

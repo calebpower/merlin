@@ -4,6 +4,7 @@ from datetime import datetime
 from geopy.distance import geodesic
 from geopy.point import Point
 from merlin.hooks.base import BaseHook
+from merlin.state import StateKey
 from operator import itemgetter
 
 logger = logging.getLogger(__name__)
@@ -29,17 +30,17 @@ class Hook(BaseHook):
 
         logger.info("hook 'user_location' loaded")
 
-    def _filter_containing_regions(asset):
+    def _filter_containing_regions(self, asset):
         containing_regions = []
         asset_location = asset["location"]
         
         for region in self.regions:
             dist = geodesic(asset_location, region["location"])
-            if dist > threshold:
+            if dist.miles > self.threshold:
                 continue
-            containing_region.append({
+            containing_regions.append({
                 "label": region["label"],
-                "distance": dist
+                "distance": dist.miles
             })
 
         containing_regions.sort(key=itemgetter('distance'))
@@ -47,7 +48,7 @@ class Hook(BaseHook):
         
 
     async def on_state_change(self, key: str, old_value, new_value):
-        if key == "hapn_device_state":
+        if key == StateKey.HAPN_DEVICE_STATE:
             logger.info(f"vehicle update: {new_value}")
 
             self.vehicle["checkin"] = datetime.strptime(
@@ -59,7 +60,7 @@ class Hook(BaseHook):
                 new_value['longitude']
             )
             
-        elif key == "mobile_device_state":
+        elif key == StateKey.MOBILE_DEVICE_STATE:
             logger.info(f"mobile device update: {new_value}")
 
             self.mobile_device["checkin"] = datetime.now()
@@ -71,8 +72,8 @@ class Hook(BaseHook):
         if not self.vehicle or not self.mobile_device:
             return
 
-        mobile_device_regions = _filter_containing_regions(self.mobile_device)
-        vehicle_regions = _filter_containing_regions(self.vehicle)
+        mobile_device_regions = self._filter_containing_regions(self.mobile_device)
+        vehicle_regions = self._filter_containing_regions(self.vehicle)
 
         # ~~~ different states ~~~
         #
@@ -97,18 +98,18 @@ class Hook(BaseHook):
 
         # get the label of the region in which the mobile device
         # is most likely to be located
-        m_loc = mobile_device_regions[0]["label"] if mobile_device_regions is not None else None
+        m_loc = mobile_device_regions[0]["label"] if mobile_device_regions else None
 
         # get the label of the region in which the vehicle
         # is most likely to be located
-        v_loc = vehicle_regions[0]["label"] if vehicle_regions is not None else None
+        v_loc = vehicle_regions[0]["label"] if vehicle_regions else None
 
         # determine whether the mobile device and vehicle are
         # near each other; assume True if they are in the same
         # region; assume False if they are in different known
         # regions; go by distance if either are abroad (i.e.
         # in unspecified regions)
-        v_m_nearby = self.threshold <= geodesic(self.mobile_device, self.vehicle) if m_loc is None or v_loc is None else m_loc == v_loc
+        v_m_nearby = geodesic(self.mobile_device["location"], self.vehicle["location"]).miles <= self.threshold if m_loc is None or v_loc is None else m_loc == v_loc
 
         # the vehicle should be considered potentially stole if
         # it is not in a known location AND it's not near the
@@ -124,5 +125,5 @@ class Hook(BaseHook):
 
         u_home = 'home' == u_loc.strip().casefold() if u_loc is not None else ''
 
-        await self.state.set("user:at_home", u_home)
-        await self.state.set("vehicle:safe", v_safe)
+        await self.state.set(StateKey.USER_AT_HOME, u_home)
+        await self.state.set(StateKey.VEHICLE_SAFE, v_safe)

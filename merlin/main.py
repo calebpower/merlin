@@ -23,6 +23,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+bg_tasks = set()
+
 async def async_main(config_path):
     # load configuration
     with open(config_path, "rb") as f:
@@ -40,43 +42,56 @@ async def async_main(config_path):
     broker = config["mqtt"]["broker"]
     port = config["mqtt"]["port"]
 
-    async with aiomqtt.Client(hostname=broker, port=port) as client:
-        # dynamically load and initialize hooks
-        for hook_cfg in config.get("hooks", []):
-            mod = importlib.import_module(hook_cfg["module"])
-            hook_inst = mod.Hook(state, client, hook_cfg)
-            hooks.append(hook_inst)
+    runners = []
+    # dynamically load hooks with a placeholder client initially
+    for hook_cfg in config.get("hooks", []):
+        mod = importlib.import_module(hook_cfg["module"])
+        hook_inst = mod.Hook(state, None, hook_cfg)
+        hooks.append(hook_inst)
+        state.register_callback(hook_inst.on_state_change)
 
-        # dynamically load and start runners
-        for runner_cfg in config.get("runners", []):
-            mod = importlib.import_module(runner_cfg["module"])
-            runner_inst = mod.Runner(state, client, runner_cfg)
-            asyncio.create_task(runner_inst.start())
+    # dynamically load and start runners
+    for runner_cfg in config.get("runners", []):
+        mod = importlib.import_module(runner_cfg["module"])
+        runner_inst = mod.Runner(state, None, runner_cfg)
+        runners.append(runner_inst)
+        task = asyncio.create_task(runner_inst.start())
+        bg_tasks.add(task)
+        task.add_done_callback(bg_tasks.discard)
 
-        # wire up state change listeners
-        for h in hooks:
-            state.register_callback(h.on_state_change)
+    api_host = config.get("api", {}).get("host", "0.0.0.0")
+    api_port = config.get("api", {}).get("port", 8080)
+    await start_api(hooks, api_host, api_port, db_path)
 
-        api_host = config.get("api", {}).get("host", "0.0.0.0")
-        api_port = config.get("api", {}).get("port", 8080)
-        await start_api(hooks, api_host, api_port, db_path)
+    while True:
+        try:
+            async with aiomqtt.Client(hostname=broker, port=port) as client:
+                # update injected MQTT clients across modules upon successful connection
+                for h in hooks: h.mqtt = client
+                for r in runners: r.mqtt = client
+    
+                logger.info(f"connected to %s:%s; listening to all topics...", broker, port)
 
-        logger.info(f"connected to %s:%s; listening to all topics...", broker, port)
+                # subscribe to all topics
+                await client.subscribe("#")
 
-        # subscribe to all topics
-        await client.subscribe("#")
+                # listen indefinitely
+                async for message in client.messages:
+                    topic = str(message.topic)
+                    try:
+                        payload = message.payload.decode() if message.payload else ""
+                    except UnicodeDecodeError:
+                        payload = "<binary>"
 
-        # listen indefinitely
-        async for message in client.messages:
-            topic = str(message.topic)
-            try:
-                payload = message.payload.decode() if message.payload else ""
-            except UnicodeDecodeError:
-                payload = "<binary>"
+                    # dispatch message to all hooks concurrently
+                    for h in hooks:
+                        asyncio.create_task(h.on_message(topic, payload))
+                        bg_tasks.add(task)
+                        task.add_done_callback(bg_tasks.discard)
 
-            # dispatch message to all hooks concurrently
-            for h in hooks:
-                asyncio.create_task(h.on_message(topic, payload))
+        except aiomqtt.MqttError as error:
+            logger.error(f"MQTT connection error: {error}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
 
 async def manage_keys(args, db_path):
     async with aiosqlite.connect(db_path) as db:
