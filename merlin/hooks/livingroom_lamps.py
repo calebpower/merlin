@@ -63,5 +63,5 @@ class Hook(BaseHook):
         if key in (StateKey.BTN_LVNGRM_SGLCLK, StateKey.BTN_LVNGRM_DBLCLK):
             await self._toggle_lamps()
 
-        elif key == StateKey.USR_LOCATION_FLAG_HOME and new_value is False:
+        elif key == StateKey.USR_LOC_HOME_FLAG and new_value is False:
             await self._toggle_lamps("OFF")

@@ -89,7 +89,7 @@ async def async_main(config_path):
 
                     # dispatch message to all hooks concurrently
                     for h in hooks:
-                        asyncio.create_task(h.on_message(topic, payload))
+                        task = asyncio.create_task(h.on_message(topic, payload))
                         bg_tasks.add(task)
                         task.add_done_callback(bg_tasks.discard)
 

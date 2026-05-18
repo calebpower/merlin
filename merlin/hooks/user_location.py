@@ -123,5 +123,5 @@ class Hook(BaseHook):
 
         u_home = "home" == u_loc.strip().casefold() if u_loc is not None else ""
 
-        await self.state.set(StateKey.USR_LOCATION_FLAG_HOME, u_home)
-        await self.state.set(StateKey.DEV_VEHICLE_FLAG_SAFE, v_safe)
+        await self.state.set(StateKey.USR_LOC_HOME_FLAG, u_home)
+        await self.state.set(StateKey.DEV_VEHICLE_SAFE_FLAG, v_safe)

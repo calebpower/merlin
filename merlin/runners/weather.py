@@ -18,5 +18,5 @@ class Runner(BaseRunner):
                 data = await response.json()
 
                 # update state
-                await self.state.set(StateKey.SYS_EXT_CLIMATE_TEMP, data["temp"])
+                await self.state.set(StateKey.SNS_EXT_CLIMATE_TEMP, data["temp"])
                 logger.info("updated weather_temp state")
