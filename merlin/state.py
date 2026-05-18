@@ -7,6 +7,7 @@ class StateKey(str, Enum):
     DEV_VEHICLE_STATE = "vehicle:state"
     DEV_VEHICLE_FLAG_SAFE = "vehicle:is_safe"
     DEV_3DPRNT_REQ = "3d_printer:kobra_neo:request"
+    DEV_OFFICE_AIRCOND_STATE = "office_aircond:state"
     USR_LOCATION_FLAG_HOME = "user:at_home"
     BTN_LVNGRM_SGLCLK = "livingroom_button:single_ts"
     BTN_LVNGRM_DBLCLK = "livingroom_button:double_ts"
