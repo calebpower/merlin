@@ -1,9 +1,9 @@
-import time
 import logging
 from merlin.hooks.base import BaseHook
 from merlin.state import StateKey
 
 logger = logging.getLogger(__name__)
+
 
 class Hook(BaseHook):
     def __init__(self, state, mqtt_client, config):
@@ -14,4 +14,4 @@ class Hook(BaseHook):
     async def on_message(self, topic: str, payload: str):
         logger.info(f"topic: {topic}")
         if topic == self.state_topic:
-            await self.state.set(StateKey.MOBILE_DEVICE_STATE, payload)
+            await self.state.set(StateKey.DEV_MOBILE_STATE, payload)

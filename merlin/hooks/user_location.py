@@ -1,13 +1,13 @@
-import json
 import logging
 from datetime import datetime
-from geopy.distance import geodesic
-from geopy.point import Point
+from geopy.distance import geodesic  # type: ignore
+from geopy.point import Point  # type: ignore
 from merlin.hooks.base import BaseHook
 from merlin.state import StateKey
 from operator import itemgetter
 
 logger = logging.getLogger(__name__)
+
 
 class Hook(BaseHook):
     def __init__(self, state, mqtt_client, config):
@@ -15,17 +15,15 @@ class Hook(BaseHook):
 
         self.mobile_device = {}
         self.vehicle = {}
-        
+
         self.regions = [
             {
-                "label": loc['label'],
-                "location": Point(
-                    loc['latitude'],
-                    loc['longitude']
-                )
-            } for loc in self.config.get("regions", [])
+                "label": loc["label"],
+                "location": Point(loc["latitude"], loc["longitude"]),
+            }
+            for loc in self.config.get("regions", [])
         ]
-        
+
         self.threshold = self.config.get("threshold", 0.25)
 
         logger.info("hook 'user_location' loaded")
@@ -33,40 +31,35 @@ class Hook(BaseHook):
     def _filter_containing_regions(self, asset):
         containing_regions = []
         asset_location = asset["location"]
-        
+
         for region in self.regions:
             dist = geodesic(asset_location, region["location"])
             if dist.miles > self.threshold:
                 continue
-            containing_regions.append({
-                "label": region["label"],
-                "distance": dist.miles
-            })
+            containing_regions.append(
+                {"label": region["label"], "distance": dist.miles}
+            )
 
-        containing_regions.sort(key=itemgetter('distance'))
+        containing_regions.sort(key=itemgetter("distance"))
         return containing_regions
-        
 
     async def on_state_change(self, key: str, old_value, new_value):
-        if key == StateKey.HAPN_DEVICE_STATE:
+        if key == StateKey.DEV_VEHICLE_STATE:
             logger.info(f"vehicle update: {new_value}")
 
             self.vehicle["checkin"] = datetime.strptime(
-                new_value['gps_time_utc'],
-                "%Y%m%d%H%M%S"
+                new_value["gps_time_utc"], "%Y%m%d%H%M%S"
             )
             self.vehicle["location"] = Point(
-                new_value['latitude'],
-                new_value['longitude']
+                new_value["latitude"], new_value["longitude"]
             )
-            
-        elif key == StateKey.MOBILE_DEVICE_STATE:
+
+        elif key == StateKey.DEV_MOBILE_STATE:
             logger.info(f"mobile device update: {new_value}")
 
             self.mobile_device["checkin"] = datetime.now()
             self.mobile_device["location"] = Point(
-                new_value['gps_latitude'],
-                new_value['gps_longitude']
+                new_value["gps_latitude"], new_value["gps_longitude"]
             )
 
         if not self.vehicle or not self.mobile_device:
@@ -109,7 +102,12 @@ class Hook(BaseHook):
         # region; assume False if they are in different known
         # regions; go by distance if either are abroad (i.e.
         # in unspecified regions)
-        v_m_nearby = geodesic(self.mobile_device["location"], self.vehicle["location"]).miles <= self.threshold if m_loc is None or v_loc is None else m_loc == v_loc
+        v_m_nearby = (
+            geodesic(self.mobile_device["location"], self.vehicle["location"]).miles
+            <= self.threshold
+            if m_loc is None or v_loc is None
+            else m_loc == v_loc
+        )
 
         # the vehicle should be considered potentially stole if
         # it is not in a known location AND it's not near the
@@ -123,7 +121,7 @@ class Hook(BaseHook):
         # sensors in the house
         u_loc = m_loc
 
-        u_home = 'home' == u_loc.strip().casefold() if u_loc is not None else ''
+        u_home = "home" == u_loc.strip().casefold() if u_loc is not None else ""
 
-        await self.state.set(StateKey.USER_AT_HOME, u_home)
-        await self.state.set(StateKey.VEHICLE_SAFE, v_safe)
+        await self.state.set(StateKey.USR_LOCATION_FLAG_HOME, u_home)
+        await self.state.set(StateKey.DEV_VEHICLE_FLAG_SAFE, v_safe)

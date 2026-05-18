@@ -1,8 +1,9 @@
 import sys
-try:
-    import _sqlite3
-except ImportError:
-    import pysqlite3
+import importlib.util
+
+if importlib.util.find_spec("_sqlite3") is None:
+    import pysqlite3  # type: ignore
+
     sys.modules["sqlite3"] = pysqlite3
 
 import argparse
@@ -13,17 +14,16 @@ import logging
 import uuid
 import aiomqtt
 import aiosqlite
-import signal
 from merlin.api import start_api
 from merlin.state import GlobalState
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-bg_tasks = set()
+bg_tasks: set[asyncio.Task] = set()
+
 
 async def async_main(config_path):
     # load configuration
@@ -67,10 +67,14 @@ async def async_main(config_path):
         try:
             async with aiomqtt.Client(hostname=broker, port=port) as client:
                 # update injected MQTT clients across modules upon successful connection
-                for h in hooks: h.mqtt = client
-                for r in runners: r.mqtt = client
-    
-                logger.info(f"connected to %s:%s; listening to all topics...", broker, port)
+                for h in hooks:
+                    h.mqtt = client
+                for r in runners:
+                    r.mqtt = client
+
+                logger.info(
+                    "connected to %s:%s; listening to all topics...", broker, port
+                )
 
                 # subscribe to all topics
                 await client.subscribe("#")
@@ -90,8 +94,11 @@ async def async_main(config_path):
                         task.add_done_callback(bg_tasks.discard)
 
         except aiomqtt.MqttError as error:
-            logger.error(f"MQTT connection error: {error}. Reconnecting in 5 seconds...")
+            logger.error(
+                f"MQTT connection error: {error}. Reconnecting in 5 seconds..."
+            )
             await asyncio.sleep(5)
+
 
 async def manage_keys(args, db_path):
     async with aiosqlite.connect(db_path) as db:
@@ -101,7 +108,9 @@ async def manage_keys(args, db_path):
                 print("Error: --topic is required when adding a key.")
                 return
             new_key = str(uuid.uuid4())
-            await db.execute("INSERT INTO API_Key (topic, key) VALUES (?, ?)", (args.topic, new_key))
+            await db.execute(
+                "INSERT INTO API_Key (topic, key) VALUES (?, ?)", (args.topic, new_key)
+            )
             await db.commit()
             print(f"Added key '{new_key}' for topic '{args.topic}'.")
         elif args.rm_key:
@@ -112,6 +121,7 @@ async def manage_keys(args, db_path):
             async with db.execute("SELECT key, topic FROM API_Key") as cursor:
                 for row in await cursor.fetchall():
                     print(f"Key: {row[0]} | Topic: {row[1]}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Merlin Home Automation")
@@ -124,6 +134,7 @@ def main():
 
     try:
         import tomllib
+
         with open(args.config, "rb") as f:
             config = tomllib.load(f)
     except Exception:
@@ -134,11 +145,12 @@ def main():
     if args.add_key or args.rm_key or args.list_keys:
         asyncio.run(manage_keys(args, db_path))
         return
-    
+
     try:
         asyncio.run(async_main(args.config))
     except KeyboardInterrupt:
         logger.info("shutting down")
-                
+
+
 if __name__ == "__main__":
     main()

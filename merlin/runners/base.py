@@ -3,6 +3,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class BaseRunner:
     def __init__(self, state, mqtt_client, config):
         self.state = state

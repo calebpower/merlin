@@ -6,30 +6,37 @@ from merlin.state import StateKey
 
 logger = logging.getLogger(__name__)
 
+
 class Runner(BaseRunner):
 
     def __init__(self, state, mqtt_client, config):
         super().__init__(state, mqtt_client, config)
         self.last_run = None
         self.bearer_token = None
-    
+
     async def tick(self):
         now = datetime.now()
-        
-        if self.bearer_token is None or self.last_run is None or timedelta(minutes=55) + self.last_run < now:
+
+        if (
+            self.bearer_token is None
+            or self.last_run is None
+            or timedelta(minutes=55) + self.last_run < now
+        ):
             logger.info("refreshing hapn bearer token")
 
             auth_endpoint = self.config.get("auth_endpoint")
             auth_payload = {
-                'grant_type': 'client_credentials',
-                'client_id': self.config.get("client_id"),
-                'client_secret': self.config.get("client_secret")
+                "grant_type": "client_credentials",
+                "client_id": self.config.get("client_id"),
+                "client_secret": self.config.get("client_secret"),
             }
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(auth_endpoint, data=auth_payload) as response:
                     if response.status != 200:
-                        logger.error(f"hapn auth endpoint failed with status {response.status}")
+                        logger.error(
+                            f"hapn auth endpoint failed with status {response.status}"
+                        )
                         self.bearer_token = None
 
                     else:
@@ -44,18 +51,22 @@ class Runner(BaseRunner):
 
             device_endpoint = self.config.get("device_endpoint")
             headers = {
-                'Accept': 'application/json',
-                'Authorization': f'Bearer {self.bearer_token}'
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.bearer_token}",
             }
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(device_endpoint, headers=headers) as response:
                     if response.status == 403:
-                        logger.error(f"hapn bearer token expired; forcing refresh on next tick")
+                        logger.error(
+                            "hapn bearer token expired; forcing refresh on next tick"
+                        )
                         self.bearer_token = None
-                        
+
                     if response.status != 200:
-                        logger.error(f"hapn device endpoint failed with status {response.status}")
+                        logger.error(
+                            f"hapn device endpoint failed with status {response.status}"
+                        )
 
                     else:
                         res_json = await response.json()
@@ -70,9 +81,9 @@ class Runner(BaseRunner):
                             "longitude": result.get("longitude"),
                             "latitude": result.get("latitude"),
                             "mileage": result.get("odoMileage"),
-                            "speed": result.get("speed")
+                            "speed": result.get("speed"),
                         }
-                        await self.state.set(StateKey.HAPN_DEVICE_STATE, hook_payload)
+                        await self.state.set(StateKey.DEV_VEHICLE_STATE, hook_payload)
 
                         logger.info("updated vehicle tracking state")
 
