@@ -24,7 +24,18 @@ defmodule Merlin.Application do
 
   @impl true
   def start(_type, _args) do
-    children = []
+    children =
+      [
+        # Owns the ETS table, and only that. Separated from the writer so a
+        # writer crash cannot take the world model with it.
+        Merlin.World.Table,
+
+        # Must precede the writer: the writer publishes through it.
+        Merlin.Bus,
+
+        # The sole process permitted to write facts.
+        Merlin.World.Writer
+      ] ++ mqtt_children()
 
     opts = [
       strategy: :rest_for_one,
@@ -34,5 +45,12 @@ defmodule Merlin.Application do
     ]
 
     Supervisor.start_link(children, opts)
+  end
+
+  # Tests must not reach for a broker. Tiers 1-4 are pure by definition, and a
+  # suite that silently depends on a listening mosquitto is a suite that fails
+  # for reasons unrelated to the code under test.
+  defp mqtt_children do
+    if Merlin.Config.start_mqtt?(), do: [Merlin.MQTT.Connection], else: []
   end
 end

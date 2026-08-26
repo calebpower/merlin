@@ -1,0 +1,197 @@
+defmodule Merlin.MQTT.Connection do
+  @moduledoc """
+  Owns the broker connection and routes inbound messages to adapters.
+
+  At start it asks every configured adapter which topics it wants, subscribes
+  to exactly that union, and builds a `Merlin.MQTT.Router` mapping filters back
+  to adapters. Nothing subscribes to `#`.
+
+  ## Malformed payloads must not crash this process
+
+  Every adapter call is wrapped. This is not defensive habit, it is a specific
+  failure mode: if `handle_ingress/4` raises, this process dies, tortoise
+  reconnects, the broker **replays the retained message**, and it raises
+  again. One retained message with an unexpected shape -- a device firmware
+  update changing a JSON field -- becomes an unkillable crash loop that takes
+  the supervision tree's restart intensity with it.
+
+  So a raising adapter is logged and dropped, and the connection keeps
+  serving. "Let it crash" is right for our own invariants; it is wrong for
+  everything arriving off a home network.
+  """
+
+  use GenServer
+  require Logger
+
+  alias Merlin.MQTT.Router
+  alias Merlin.World
+
+  defstruct [:client, :handle, :router, :adapters, :subscriptions, :connected?]
+
+  @doc false
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+
+  @doc "Publish through the live connection. Returns `{:error, :disconnected}` if there isn't one."
+  @spec publish(binary(), binary(), keyword()) :: :ok | {:error, term()}
+  def publish(topic, payload, opts \\ []) do
+    GenServer.call(__MODULE__, {:publish, topic, payload, opts})
+  end
+
+  @doc "Whether the broker connection is currently up."
+  @spec connected?() :: boolean()
+  def connected?, do: GenServer.call(__MODULE__, :connected?)
+
+  @doc """
+  The topic filters actually subscribed to, as `[{filter, qos}]`.
+
+  Exposed so a test can assert what was asked of the broker -- specifically
+  that it is the adapters' declared union and not `#`.
+  """
+  @spec subscriptions() :: [{binary(), 0..2}]
+  def subscriptions, do: GenServer.call(__MODULE__, :subscriptions)
+
+  @impl true
+  def init(opts) do
+    client = Keyword.get(opts, :client, Merlin.MQTT.Tortoise)
+    adapters = Keyword.get(opts, :adapters, Merlin.Config.adapters())
+
+    {router, subscriptions} = build_routes(adapters)
+
+    start_opts = [
+      client_id: Keyword.get(opts, :client_id, Merlin.Config.client_id()),
+      host: Keyword.get(opts, :host, Merlin.Config.broker_host()),
+      port: Keyword.get(opts, :port, Merlin.Config.broker_port()),
+      owner: self(),
+      subscriptions: subscriptions
+    ]
+
+    case client.start(start_opts) do
+      {:ok, handle} ->
+        Logger.info(
+          "mqtt connecting to #{start_opts[:host]}:#{start_opts[:port]} as " <>
+            "#{start_opts[:client_id]}, #{length(subscriptions)} subscription(s)"
+        )
+
+        {:ok,
+         %__MODULE__{
+           client: client,
+           handle: handle,
+           router: router,
+           adapters: adapters,
+           subscriptions: subscriptions,
+           connected?: false
+         }}
+
+      {:error, reason} ->
+        {:stop, {:mqtt_start_failed, reason}}
+    end
+  end
+
+  @impl true
+  def handle_call({:publish, topic, _payload, _opts}, _from, %{connected?: false} = state) do
+    Logger.warning("dropping publish to #{topic}: not connected")
+    {:reply, {:error, :disconnected}, state}
+  end
+
+  def handle_call({:publish, topic, payload, opts}, _from, state) do
+    {:reply, state.client.publish(state.handle, topic, payload, opts), state}
+  end
+
+  def handle_call(:connected?, _from, state), do: {:reply, state.connected?, state}
+
+  def handle_call(:subscriptions, _from, state), do: {:reply, state.subscriptions, state}
+
+  @impl true
+  def handle_info({:mqtt_message, topic, payload}, state) do
+    case Router.match(state.router, topic) do
+      [] ->
+        # The broker sent something no filter asked for. Not fatal, but it
+        # means a subscription is wider than the router knows about.
+        Logger.debug("unrouted message on #{topic}")
+
+      matches ->
+        Enum.each(matches, fn {{module, opts}, captures} ->
+          dispatch(module, opts, topic, payload, captures, state)
+        end)
+    end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:mqtt_connection, :up}, state) do
+    Logger.info("mqtt connected")
+    {:noreply, %{state | connected?: true}}
+  end
+
+  def handle_info({:mqtt_connection, :down}, state) do
+    Logger.warning("mqtt disconnected")
+    {:noreply, %{state | connected?: false}}
+  end
+
+  def handle_info({:mqtt_connection, other}, state) do
+    Logger.debug("mqtt connection status: #{inspect(other)}")
+    {:noreply, state}
+  end
+
+  def handle_info({:mqtt_subscription, status, filter}, state) do
+    Logger.debug("mqtt subscription #{inspect(status)}: #{filter}")
+    {:noreply, state}
+  end
+
+  def handle_info({:mqtt_terminated, reason}, state) do
+    Logger.warning("mqtt handler terminated: #{inspect(reason)}")
+    {:noreply, %{state | connected?: false}}
+  end
+
+  def handle_info(other, state) do
+    Logger.debug("unexpected message: #{inspect(other)}")
+    {:noreply, state}
+  end
+
+  # --- routing --------------------------------------------------------------
+
+  defp build_routes(adapters) do
+    Enum.reduce(adapters, {Router.new(), []}, fn {module, opts}, {router, subs} ->
+      module.subscriptions(opts)
+      |> Enum.reduce({router, subs}, fn {:mqtt, filter, qos}, {r, s} ->
+        {Router.add!(r, filter, {module, opts}), [{filter, qos} | s]}
+      end)
+    end)
+    |> then(fn {router, subs} -> {router, Enum.uniq(subs) |> Enum.reverse()} end)
+  end
+
+  defp dispatch(module, opts, topic, payload, captures, state) do
+    case module.handle_ingress(topic, payload, captures, opts) do
+      {:ok, emissions} ->
+        Enum.each(emissions, &apply_emission(&1, module, state))
+
+      {:error, reason} ->
+        Logger.warning("#{inspect(module)} rejected #{topic}: #{inspect(reason)}")
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "#{inspect(module)} raised on #{topic}: #{Exception.message(e)} " <>
+          "-- payload dropped (#{byte_size(payload)} bytes)"
+      )
+  catch
+    kind, reason ->
+      Logger.warning("#{inspect(module)} threw #{kind} on #{topic}: #{inspect(reason)}")
+  end
+
+  defp apply_emission({:fact, path, value}, module, _state) do
+    World.put(path, value, source: {:adapter, module})
+  end
+
+  defp apply_emission({:event, path, payload}, module, _state) do
+    World.emit(path, payload, source: {:adapter, module})
+  end
+
+  defp apply_emission({:publish, topic, payload, opts}, _module, state) do
+    if state.connected? do
+      state.client.publish(state.handle, topic, payload, opts)
+    else
+      Logger.warning("dropping publish to #{topic}: not connected")
+    end
+  end
+end

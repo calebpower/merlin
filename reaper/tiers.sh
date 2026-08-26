@@ -76,8 +76,8 @@ skip 4 "server contract"       "lands with POST /snitch in M3"
 # ---------------------------------------------------------------------------
 # Tiers 5-9: need the broker and/or the full stack.
 # ---------------------------------------------------------------------------
-skip 5 "daemon vs fakes"    "lands with the MQTT behaviour + Req.Test in M2/M6"
-skip 6 "full stack, staged" "lands with persistence + hostile DB start in M6/M7"
+skip 5 "daemon vs fakes"    "Mox over Merlin.MQTT.Client; lands M2/M6"
+tier 6 "full stack (smoke)" sh reaper/smoke.sh
 skip 7 "seeded fuzzing"     "next after tier 1 -- highest defect-per-line; M3"
 skip 8 "concurrency"        "lands with the SQLite WAL claim in M3"
 skip 9 "simulated house"    "lands at M7; needs persistence and the settle period"
