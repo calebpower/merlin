@@ -1,0 +1,77 @@
+#!/bin/sh
+#
+# PROVIDE: merlin_ex
+# REQUIRE: LOGIN NETWORKING
+# KEYWORD: shutdown
+#
+# merlin, the Elixir daemon.
+#
+# Installed as /usr/local/etc/rc.d/merlin-ex. Named -ex, and living beside the
+# Python installation rather than replacing it, for as long as the Python tree
+# at /usr/local/merlin remains the rollback. Rename once the soak is over.
+#
+# rc.conf:
+#   merlin_ex_enable="YES"
+
+. /etc/rc.subr
+
+name="merlin_ex"
+rcvar="merlin_ex_enable"
+
+load_rc_config $name
+
+: ${merlin_ex_enable:="NO"}
+: ${merlin_ex_user:="merlin"}
+: ${merlin_ex_root:="/usr/local/merlin-ex/current"}
+: ${merlin_ex_config:="/usr/local/etc/merlin/merlin.exs"}
+: ${merlin_ex_state:="/var/db/merlin"}
+: ${merlin_ex_log:="/var/log/merlin"}
+
+pidfile="/var/run/merlin-ex.pid"          # daemon(8)'s supervisor
+procpidfile="/var/run/merlin-ex.child.pid" # the BEAM itself
+
+command="/usr/sbin/daemon"
+
+# `bin/merlin start` runs the BEAM in the FOREGROUND and daemon(8) backgrounds
+# it. Do not use `bin/merlin daemon` here: double-daemonising detaches the VM
+# from daemon(8), which then supervises nothing and tracks the wrong pid.
+#
+# -R 5 is the outer net beneath OTP supervision. OTP handles process crashes;
+# this handles VM death and the OOM killer. It is deliberately paired with the
+# low max_restarts in Merlin.Application -- fail fast inside, restart outside.
+command_args="-f -R 5 -P ${pidfile} -p ${procpidfile} -u ${merlin_ex_user} \
+    -S -T merlin-ex \
+    ${merlin_ex_root}/bin/merlin start"
+
+start_precmd="merlin_ex_precmd"
+stop_cmd="merlin_ex_stop"
+extra_commands="preflight"
+preflight_cmd="merlin_ex_preflight"
+
+merlin_ex_precmd()
+{
+    install -d -o "${merlin_ex_user}" -g "${merlin_ex_user}" -m 0750 \
+        "${merlin_ex_state}" "${merlin_ex_state}/tmp" "${merlin_ex_log}"
+
+    merlin_ex_preflight || {
+        warn "merlin preflight failed; refusing to start"
+        return 1
+    }
+}
+
+merlin_ex_preflight()
+{
+    su -m "${merlin_ex_user}" -c \
+        "MERLIN_CONFIG=${merlin_ex_config} MERLIN_STATE_DIR=${merlin_ex_state} \
+         ${merlin_ex_root}/bin/merlin eval 'Merlin.Preflight.run!()'"
+}
+
+# Graceful, so the fact snapshot flushes. A signal-kill loses up to the
+# snapshot interval of latch state -- which is exactly the state whose loss
+# causes wrong behaviour on the next boot.
+merlin_ex_stop()
+{
+    su -m "${merlin_ex_user}" -c "${merlin_ex_root}/bin/merlin stop"
+}
+
+run_rc_command "$1"
