@@ -61,8 +61,7 @@ defmodule Merlin.MQTT.Connection do
       client_id: Keyword.get(opts, :client_id, Merlin.Config.client_id()),
       host: Keyword.get(opts, :host, Merlin.Config.broker_host()),
       port: Keyword.get(opts, :port, Merlin.Config.broker_port()),
-      owner: self(),
-      subscriptions: subscriptions
+      owner: self()
     ]
 
     case client.start(start_opts) do
@@ -119,7 +118,16 @@ defmodule Merlin.MQTT.Connection do
   end
 
   def handle_info({:mqtt_connection, :up}, state) do
-    Logger.info("mqtt connected")
+    # Subscribe here, not at connect. Every :up re-establishes the set, so a
+    # reconnect needs no special handling.
+    case state.client.subscribe(state.handle, state.subscriptions) do
+      :ok ->
+        Logger.info("mqtt connected; #{length(state.subscriptions)} subscription(s) established")
+
+      {:error, reason} ->
+        Logger.warning("mqtt connected but subscribe failed: #{inspect(reason)}")
+    end
+
     {:noreply, %{state | connected?: true}}
   end
 
@@ -154,7 +162,9 @@ defmodule Merlin.MQTT.Connection do
     Enum.reduce(adapters, {Router.new(), []}, fn {module, opts}, {router, subs} ->
       module.subscriptions(opts)
       |> Enum.reduce({router, subs}, fn {:mqtt, filter, qos}, {r, s} ->
-        {Router.add!(r, filter, {module, opts}), [{filter, qos} | s]}
+        # Route on the authored filter (captures intact); subscribe with the
+        # wire-legal form. See Router.wire_filter/1.
+        {Router.add!(r, filter, {module, opts}), [{Router.wire_filter(filter), qos} | s]}
       end)
     end)
     |> then(fn {router, subs} -> {router, Enum.uniq(subs) |> Enum.reverse()} end)

@@ -18,14 +18,25 @@ defmodule Merlin.MQTT.Client do
   @doc """
   Open a connection.
 
-  Options carry `:client_id`, `:host`, `:port`, `:owner` (the process that
-  receives inbound messages) and `:subscriptions` as `[{filter, qos}]`.
+  Options carry `:client_id`, `:host`, `:port` and `:owner` (the process that
+  receives inbound messages).
 
-  Subscriptions are given at connect time rather than afterwards so that
-  reconnection re-establishes them without merlin having to notice the
-  reconnect at all.
+  Subscriptions are NOT given here. tortoise311 sends a connect-time
+  subscription set with `identifier: nil`, and MQTT 3.1.1 requires a non-zero
+  packet identifier on SUBSCRIBE -- mosquitto rejects the packet and drops the
+  TCP connection, producing a connect/subscribe/close loop that reads like a
+  network fault. Subscribing after the connection is up assigns an identifier
+  properly. See `c:subscribe/2`.
   """
   @callback start(opts :: keyword()) :: {:ok, handle()} | {:error, term()}
+
+  @doc """
+  Subscribe once the connection is up.
+
+  Called on every `:up` transition, so a reconnect re-establishes the set
+  without the caller tracking connection state itself.
+  """
+  @callback subscribe(handle(), [{binary(), 0..2}]) :: :ok | {:error, term()}
 
   @doc "Publish. `opts` carries `:qos` and `:retain`."
   @callback publish(handle(), topic :: binary(), payload :: binary(), opts :: keyword()) ::

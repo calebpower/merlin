@@ -28,6 +28,18 @@ defmodule Merlin.BusTest do
 
   defp event(path), do: %Event{path: path, payload: :p, at: 0, source: nil}
 
+  # Bounded retry for a claim that is eventual rather than immediate.
+  defp eventually(fun, attempts \\ 50) do
+    Enum.reduce_while(1..attempts, false, fn _, _ ->
+      if fun.() do
+        {:halt, true}
+      else
+        Process.sleep(20)
+        {:cont, false}
+      end
+    end)
+  end
+
   describe "prefix matching" do
     test "an exact subscription receives its own path" do
       id = uniq()
@@ -144,7 +156,13 @@ defmodule Merlin.BusTest do
       send(sub, :stop)
       assert_receive {:DOWN, ^ref, :process, ^sub, _}
 
-      assert 0 = Bus.publish(change(p))
+      # Registry cleans up asynchronously, so a DOWN message does not mean the
+      # entry is already gone. The claim is that it is dropped *eventually*,
+      # without anyone having to unsubscribe -- which the Python's plain
+      # callback list could never do at all. Assert that, not an immediate
+      # guarantee Registry never made.
+      assert eventually(fn -> Bus.publish(change(p)) == 0 end),
+             "a dead subscriber was still receiving after 1s"
     end
   end
 end

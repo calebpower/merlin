@@ -70,7 +70,7 @@ export MIX_ENV=test
 tier 1 "pure unit" mix test --only tier1 --warnings-as-errors
 
 skip 2 "component conformance" "deferred to M9; no rendered markup exists yet"
-skip 3 "source-as-data"        "lands with the boot validator in M2"
+tier 3 "source-as-data" mix test --only tier3 --warnings-as-errors
 skip 4 "server contract"       "lands with POST /snitch in M3"
 
 # ---------------------------------------------------------------------------
@@ -88,6 +88,9 @@ skip 11 "human evidence"     "not applicable -- single maintainer, no first-time
 # ---------------------------------------------------------------------------
 # Summary. The ledger is the artifact; the exit status is the gate.
 # ---------------------------------------------------------------------------
+# Leave nothing holding a dataset or a port into the next run.
+broker_down
+
 say "ledger:"
 cat "$LEDGER"
 

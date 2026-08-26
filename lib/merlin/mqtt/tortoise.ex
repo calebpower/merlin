@@ -65,21 +65,37 @@ defmodule Merlin.MQTT.Tortoise do
     owner = Keyword.fetch!(opts, :owner)
     host = Keyword.get(opts, :host, "localhost")
     port = Keyword.get(opts, :port, 1883)
-    subscriptions = Keyword.get(opts, :subscriptions, [])
-
     connection_opts = [
       client_id: client_id,
       server: {Tortoise311.Transport.Tcp, host: host, port: port},
       handler: {Merlin.MQTT.Handler, [owner: owner]},
-      subscriptions: subscriptions,
+      # No :subscriptions here -- see Merlin.MQTT.Client.start/1 for why the
+      # connect-time set is unusable.
+      #
       # Retained state on the broker is how device facts survive a restart, so
       # a durable session is wanted rather than a clean one.
-      clean_session: false
+      clean_session: false,
+      # Off deliberately. tortoise311's telemetry path calls :inet.getstat/1 on
+      # the socket and logs "Failed to get socket stats: {:error, :einval}"; the
+      # same error shape then crashes Connection.Inflight on an unhandled case
+      # clause. We emit our own telemetry from the effect dispatcher and need
+      # none of theirs.
+      enable_telemetry: false
     ]
 
     case Tortoise311.Connection.start_link(connection_opts) do
       {:ok, _pid} -> {:ok, client_id}
       {:error, {:already_started, _pid}} -> {:ok, client_id}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def subscribe(_client_id, []), do: :ok
+
+  def subscribe(client_id, topics) do
+    case Tortoise311.Connection.subscribe_sync(client_id, topics) do
+      :ok -> :ok
       {:error, reason} -> {:error, reason}
     end
   end

@@ -24,6 +24,8 @@ defmodule Merlin.Application do
 
   @impl true
   def start(_type, _args) do
+    load_config!()
+
     children =
       [
         # Owns the ETS table, and only that. Separated from the writer so a
@@ -51,6 +53,36 @@ defmodule Merlin.Application do
   # suite that silently depends on a listening mosquitto is a suite that fails
   # for reasons unrelated to the code under test.
   defp mqtt_children do
-    if Merlin.Config.start_mqtt?(), do: [Merlin.MQTT.Connection], else: []
+    if Merlin.Config.start_mqtt?(),
+      do: [Merlin.MQTT.Connection, Merlin.Rules.Engine],
+      else: []
+  end
+
+  # A bad config is a refusal to start, not a warning.
+  #
+  # `main.py:135` wrapped its config load in `try/except Exception` and fell
+  # back to `{}` -- so a typo produced a daemon that started cleanly, connected
+  # to the broker, loaded no hooks and did nothing at all, with no error
+  # anywhere. That is the single worst failure mode available to a home daemon,
+  # because everything looks healthy.
+  defp load_config! do
+    if Merlin.Config.start_mqtt?() do
+      case Merlin.Config.load() do
+        :ok ->
+          :ok
+
+        {:error, errors} ->
+          IO.puts(:stderr, """
+          merlin: configuration is invalid, refusing to start
+
+          #{Merlin.Config.File.format_errors(errors)}
+          """)
+
+          System.halt(2)
+      end
+    else
+      # Under test the house config is installed per-test; there is no file.
+      :ok
+    end
   end
 end

@@ -143,6 +143,48 @@ defmodule Merlin.MQTT.RouterTest do
     end
   end
 
+  describe "wire_filter/1 — what the broker is allowed to see" do
+    # `+room` is this module's own notation. MQTT requires `+` to occupy a
+    # whole level, so sending `home/+room/...` in a SUBSCRIBE makes mosquitto
+    # answer "Invalid subscription string" and drop the connection as a
+    # malformed packet -- which at the client looks like an unexplained
+    # connect/subscribe/disconnect loop. It cost six runs to find.
+    test "strips capture names from wildcards" do
+      assert Router.wire_filter("home/+room/sensor/contact") == "home/+/sensor/contact"
+      assert Router.wire_filter("z/+room/+device/state") == "z/+/+/state"
+    end
+
+    test "leaves already-legal filters untouched" do
+      assert Router.wire_filter("home/+/sensor/contact") == "home/+/sensor/contact"
+      assert Router.wire_filter("test/ping") == "test/ping"
+      assert Router.wire_filter("sport/#") == "sport/#"
+      assert Router.wire_filter("#") == "#"
+    end
+
+    test "the result never contains a named wildcard" do
+      for filter <- [
+            "home/+room/sensor/contact",
+            "a/+x/b/+y/c",
+            "+leading/rest",
+            "test/ping",
+            "sport/#"
+          ] do
+        wire = Router.wire_filter(filter)
+
+        for segment <- String.split(wire, "/") do
+          assert segment == "+" or not String.starts_with?(segment, "+"),
+                 "#{filter} produced illegal wire segment #{inspect(segment)}"
+        end
+      end
+    end
+
+    test "matching still uses the authored filter, captures intact" do
+      # The wire form is for the broker only; routing must keep the names.
+      r = router([{"home/+room/sensor/contact", :door}])
+      assert [{:door, %{"room" => "office"}}] = Router.match(r, "home/office/sensor/contact")
+    end
+  end
+
   describe "boundaries" do
     test "an empty router matches nothing" do
       assert [] = Router.match(Router.new(), "anything/at/all")

@@ -66,6 +66,31 @@ defmodule Merlin.MQTT.Router do
   end
 
   @doc """
+  The wire-legal form of a filter: capture names stripped from wildcards.
+
+      iex> Merlin.MQTT.Router.wire_filter("home/+room/sensor/contact")
+      "home/+/sensor/contact"
+
+  `+room` is this module's own notation and **must never reach a broker**. MQTT
+  3.1.1 requires `+` to occupy an entire level, so `+room` is a literal segment
+  containing an illegal character: mosquitto answers a SUBSCRIBE containing one
+  with "Invalid subscription string" and closes the connection as a malformed
+  packet. That surfaces at the client as a connect/subscribe/drop loop with no
+  obvious cause, which is exactly how it presented.
+
+  Subscribe with this; route with the original.
+  """
+  @spec wire_filter(binary()) :: binary()
+  def wire_filter(filter) when is_binary(filter) do
+    filter
+    |> String.split("/")
+    |> Enum.map_join("/", fn
+      "+" <> _ -> "+"
+      segment -> segment
+    end)
+  end
+
+  @doc """
   Every entry whose filter matches `topic`, as `{value, captures}`.
 
   A topic may match several filters; all of them are returned. Order is not
