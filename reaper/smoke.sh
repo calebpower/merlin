@@ -298,12 +298,12 @@ esac
 # ---------------------------------------------------------------------------
 say "checking button -> lamps"
 
-lamp_set='zigbee2mqtt/living_room_lamps/set'
+lamp_set='z2m/living_room_lamps/set'
 press() {
     /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r \
-        -t 'zigbee2mqtt/home/living_room/plug/lamp_1' -m "{\"state\":\"$1\"}" 2>/dev/null
+        -t 'z2m/home/living_room/plug/lamp_1' -m "{\"state\":\"$1\"}" 2>/dev/null
     /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r \
-        -t 'zigbee2mqtt/home/living_room/plug/lamp_2' -m "{\"state\":\"$2\"}" 2>/dev/null
+        -t 'z2m/home/living_room/plug/lamp_2' -m "{\"state\":\"$2\"}" 2>/dev/null
     sleep 0.4
 
     out="$REAPER_OUT/smoke-lamps-$3.txt"
@@ -312,7 +312,7 @@ press() {
     lamp_sub=$!
     sleep 0.3
     /usr/local/bin/mosquitto_pub -h 127.0.0.1 \
-        -t 'zigbee2mqtt/home/living_room/switch/lamps/action' -m "$3" 2>/dev/null
+        -t 'z2m/home/living_room/switch/lamps/action' -m "$3" 2>/dev/null
     wait "$lamp_sub" 2>/dev/null || true
     cat "$out" 2>/dev/null
 }
@@ -343,7 +343,7 @@ esac
 # Clear the retained lamp states so the next run starts clean.
 for t in lamp_1 lamp_2; do
     /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r -n \
-        -t "zigbee2mqtt/home/living_room/plug/$t" 2>/dev/null || true
+        -t "z2m/home/living_room/plug/$t" 2>/dev/null || true
 done
 
 # ---------------------------------------------------------------------------
@@ -609,12 +609,12 @@ plug_log="$REAPER_OUT/smoke-plugs.txt"
 
 # Tell the daemon the A/C is on, so there is a desire worth restoring.
 /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r \
-    -t 'home/office/plug/climate' -m '{"state":"ON"}' 2>/dev/null
+    -t 'z2m/home/office/plug/climate' -m '{"state":"ON"}' 2>/dev/null
 sleep 0.5
 
 # Watch both plug set-topics with timestamps, for the whole cycle.
 /usr/local/bin/mosquitto_sub -h 127.0.0.1 -v -W 14 \
-    -t 'home/office/plug/+/set' > "$plug_log" 2>/dev/null &
+    -t 'z2m/home/office/plug/+/set' > "$plug_log" 2>/dev/null &
 plug_sub=$!
 sleep 0.3
 
@@ -629,7 +629,7 @@ sleep 0.3
 # deleted it from the shipped config survived the whole battery.
 ( sleep 2
   /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r \
-      -t 'home/office/plug/climate' -m '{"state":"OFF"}' 2>/dev/null ) &
+      -t 'z2m/home/office/plug/climate' -m '{"state":"OFF"}' 2>/dev/null ) &
 
 wait "$plug_sub" 2>/dev/null || true
 
@@ -741,7 +741,7 @@ latch_now() {
 
 say "opening a door while away"
 /usr/local/bin/mosquitto_pub -h 127.0.0.1 \
-    -t 'home/garage/sensor/contact' -m '{"state":"ON"}' 2>/dev/null
+    -t 'z2m/home/garage/sensor/contact' -m '{"state":"ON"}' 2>/dev/null
 
 i=0
 while [ "$i" -lt 20 ]; do

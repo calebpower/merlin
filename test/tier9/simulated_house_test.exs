@@ -73,12 +73,12 @@ defmodule Merlin.SimulatedHouseTest do
     test "ac_off_for_the_whole_cycle catches bug 7" do
       broken = [
         entry(1, note: "printer reboot requested"),
-        publish(2, "home/office/plug/3d_printer/set", ~s({"state":"OFF"})),
-        publish(3, "home/office/plug/climate/set", ~s({"state":"OFF"})),
+        publish(2, "z2m/home/office/plug/3d_printer/set", ~s({"state":"OFF"})),
+        publish(3, "z2m/home/office/plug/climate/set", ~s({"state":"OFF"})),
         # The A/C comes back while the printer is still down. This is exactly
         # what office_aircond.py did.
-        publish(4, "home/office/plug/climate/set", ~s({"state":"ON"})),
-        publish(5, "home/office/plug/3d_printer/set", ~s({"state":"ON"}))
+        publish(4, "z2m/home/office/plug/climate/set", ~s({"state":"ON"})),
+        publish(5, "z2m/home/office/plug/3d_printer/set", ~s({"state":"ON"}))
       ]
 
       assert [msg] = Invariants.ac_off_for_the_whole_cycle(broken)
@@ -88,10 +88,10 @@ defmodule Merlin.SimulatedHouseTest do
     test "ac_off_for_the_whole_cycle is quiet on a correct cycle" do
       clean = [
         entry(1, note: "printer reboot requested"),
-        publish(2, "home/office/plug/3d_printer/set", ~s({"state":"OFF"})),
-        publish(3, "home/office/plug/climate/set", ~s({"state":"OFF"})),
-        publish(4, "home/office/plug/3d_printer/set", ~s({"state":"ON"})),
-        publish(5, "home/office/plug/climate/set", ~s({"state":"ON"}))
+        publish(2, "z2m/home/office/plug/3d_printer/set", ~s({"state":"OFF"})),
+        publish(3, "z2m/home/office/plug/climate/set", ~s({"state":"OFF"})),
+        publish(4, "z2m/home/office/plug/3d_printer/set", ~s({"state":"ON"})),
+        publish(5, "z2m/home/office/plug/climate/set", ~s({"state":"ON"}))
       ]
 
       assert Invariants.ac_off_for_the_whole_cycle(clean) == []
@@ -196,20 +196,20 @@ defmodule Merlin.SimulatedHouseTest do
     end
 
     test "nothing_published_while_settling catches a hole in the window" do
-      broken = [publish(1, "home/office/plug/climate/set", "ON", settling?: true)]
+      broken = [publish(1, "z2m/home/office/plug/climate/set", "ON", settling?: true)]
 
       assert [msg] = Invariants.nothing_published_while_settling(broken)
       assert msg =~ "while still settling"
     end
 
     test "nothing_published_while_settling is quiet after the window closes" do
-      clean = [publish(1, "home/office/plug/climate/set", "ON", settling?: false)]
+      clean = [publish(1, "z2m/home/office/plug/climate/set", "ON", settling?: false)]
       assert Invariants.nothing_published_while_settling(clean) == []
     end
 
     test "lamps_never_commanded_in_daylight catches a daytime arrival" do
       broken = [
-        publish(1, "zigbee2mqtt/living_room_lamps/set", ~s({"state":"ON"}),
+        publish(1, "z2m/living_room_lamps/set", ~s({"state":"ON"}),
           facts: %{[:sun, :state] => :day}
         )
       ]
@@ -220,7 +220,7 @@ defmodule Merlin.SimulatedHouseTest do
 
     test "lamps_never_commanded_in_daylight permits the same command after dark" do
       clean = [
-        publish(1, "zigbee2mqtt/living_room_lamps/set", ~s({"state":"ON"}),
+        publish(1, "z2m/living_room_lamps/set", ~s({"state":"ON"}),
           facts: %{[:sun, :state] => :night}
         )
       ]
@@ -230,7 +230,7 @@ defmodule Merlin.SimulatedHouseTest do
 
     test "no_command_without_a_reason catches actuation from nothing" do
       broken = [
-        publish(1, "home/office/plug/climate/set", "ON"),
+        publish(1, "z2m/home/office/plug/climate/set", "ON"),
         entry(2, note: "a door opened")
       ]
 
@@ -241,7 +241,7 @@ defmodule Merlin.SimulatedHouseTest do
     test "no_command_without_a_reason is quiet when something caused it" do
       clean = [
         entry(1, note: "a door opened"),
-        publish(2, "home/office/plug/climate/set", "ON")
+        publish(2, "z2m/home/office/plug/climate/set", "ON")
       ]
 
       assert Invariants.no_command_without_a_reason(clean) == []
@@ -274,7 +274,7 @@ defmodule Merlin.SimulatedHouseTest do
     test "a clean timeline violates nothing at all" do
       clean = [
         entry(1, note: "a door opened", facts: %{[:person, :owner, :zone] => :home}),
-        publish(2, "zigbee2mqtt/living_room_lamps/set", ~s({"state":"ON"}),
+        publish(2, "z2m/living_room_lamps/set", ~s({"state":"ON"}),
           facts: %{[:sun, :state] => :night}
         )
       ]
@@ -364,8 +364,8 @@ defmodule Merlin.SimulatedHouseTest do
           {topic, rand} =
             pick(
               [
-                "home/garage/sensor/contact",
-                "home/office/plug/climate",
+                "z2m/home/garage/sensor/contact",
+                "z2m/home/office/plug/climate",
                 "http/mobile/ariia/state",
                 "moonraker/status/print_stats"
               ],
@@ -387,10 +387,10 @@ defmodule Merlin.SimulatedHouseTest do
   end
 
   defp apply_action(house, {:door, room, state}, _last),
-    do: SimHouse.device(house, "home/#{room}/sensor/contact", ~s({"state":"#{state}"}))
+    do: SimHouse.device(house, "z2m/home/#{room}/sensor/contact", ~s({"state":"#{state}"}))
 
   defp apply_action(house, {:button, press}, _last),
-    do: SimHouse.device(house, "zigbee2mqtt/home/living_room/switch/lamps/action", press)
+    do: SimHouse.device(house, "z2m/home/living_room/switch/lamps/action", press)
 
   defp apply_action(house, {:phone, zone, accuracy}, _last) do
     {lat, lon} = Map.fetch!(@zones, zone)
@@ -403,7 +403,7 @@ defmodule Merlin.SimulatedHouseTest do
   end
 
   defp apply_action(house, {:climate, state}, _last),
-    do: SimHouse.device(house, "home/office/plug/climate", ~s({"state":"#{state}"}), retain: true)
+    do: SimHouse.device(house, "z2m/home/office/plug/climate", ~s({"state":"#{state}"}), retain: true)
 
   defp apply_action(house, {:print_job, job}, _last),
     do: SimHouse.device(house, "moonraker/status/print_stats", ~s({"print_stats":{"state":"#{job}"}}))
@@ -557,8 +557,8 @@ defmodule Merlin.SimulatedHouseTest do
             fn payload, house ->
               Enum.reduce(
                 [
-                  "home/garage/sensor/contact",
-                  "home/office/plug/climate",
+                  "z2m/home/garage/sensor/contact",
+                  "z2m/home/office/plug/climate",
                   "http/mobile/ariia/state",
                   "bubbles/anycubic_kobra_neo/power",
                   "moonraker/status/print_stats"
@@ -594,12 +594,12 @@ defmodule Merlin.SimulatedHouseTest do
         SimHouse.start(
           seed: 7,
           retained: [
-            {"home/garage/sensor/contact", ~s({"state":"ON"})},
-            {"home/front/sensor/contact", ~s({"state":"ON"})},
-            {"home/office/plug/climate", ~s({"state":"ON"})},
+            {"z2m/home/garage/sensor/contact", ~s({"state":"ON"})},
+            {"z2m/home/front/sensor/contact", ~s({"state":"ON"})},
+            {"z2m/home/office/plug/climate", ~s({"state":"ON"})},
             {"moonraker/status/print_stats", ~s({"print_stats":{"state":"printing"}})},
-            {"zigbee2mqtt/home/living_room/plug/lamp_1", ~s({"state":"OFF"})},
-            {"zigbee2mqtt/home/living_room/plug/lamp_2", ~s({"state":"OFF"})}
+            {"z2m/home/living_room/plug/lamp_1", ~s({"state":"OFF"})},
+            {"z2m/home/living_room/plug/lamp_2", ~s({"state":"OFF"})}
           ]
         )
 

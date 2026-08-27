@@ -16,7 +16,7 @@ defmodule Merlin.Test.Invariants do
       %{
         seq: 12,
         kind: :publish | :step,
-        topic: "home/office/plug/climate/set",   # :publish only
+        topic: "z2m/home/office/plug/climate/set",   # :publish only
         payload: ~s({"state":"ON"}),             # :publish only
         note: "door garage -> open",             # :step only
         settling?: false,
@@ -79,13 +79,13 @@ defmodule Merlin.Test.Invariants do
     |> Enum.filter(&(&1.kind == :publish))
     |> Enum.reduce({nil, []}, fn e, {printer_down_at, violations} ->
       cond do
-        e.topic == "home/office/plug/3d_printer/set" and state_of(e.payload) == :off ->
+        e.topic == "z2m/home/office/plug/3d_printer/set" and state_of(e.payload) == :off ->
           {e.seq, violations}
 
-        e.topic == "home/office/plug/3d_printer/set" and state_of(e.payload) == :on ->
+        e.topic == "z2m/home/office/plug/3d_printer/set" and state_of(e.payload) == :on ->
           {nil, violations}
 
-        printer_down_at != nil and e.topic == "home/office/plug/climate/set" and
+        printer_down_at != nil and e.topic == "z2m/home/office/plug/climate/set" and
             state_of(e.payload) == :on ->
           {printer_down_at,
            [
