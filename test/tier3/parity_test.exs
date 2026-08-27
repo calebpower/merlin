@@ -53,7 +53,10 @@ defmodule Merlin.ParityTest do
     "hooks/alerts.py" => {:rule, :intruder_latch},
     "hooks/user_location.py" => {:derived, :caleb_presence},
     "runners/hapn_tracker.py" => {:derived, :hapn},
-    "runners/weather.py" => {:derived, :weather}
+    # Ported as a capability, not enabled: the Python declares no weather
+    # config, so it has never run and there are no credentials to migrate.
+    "runners/weather.py" =>
+      {:unconfigured, "no weather entry in the Python config; it has never run"}
   }
 
   # Structural, not behavioural: base classes and package markers.
@@ -141,4 +144,9 @@ defmodule Merlin.ParityTest do
     do: Enum.any?(Map.get(raw, :derived, []), &(Map.get(&1, :id) == id))
 
   defp exists?(:deliberately_dropped, _config, _raw), do: true
+
+  # A recorded decision NOT to configure something is a legitimate answer, and
+  # a different one from dropping it: the capability exists and is tested, it
+  # simply has nothing to talk to.
+  defp exists?({:unconfigured, reason}, _config, _raw) when is_binary(reason), do: true
 end
