@@ -1,0 +1,91 @@
+# merlin, as a reaper tenant.
+#
+# One guest, and deliberately so. merlin is a FreeBSD daemon that ships as a
+# `mix release` with `include_erts: true`, which bundles the build host's ERTS
+# and links that host's libcrypto; `exqlite` compiles a SQLite NIF beside it.
+# Neither cross-builds. A release built anywhere but FreeBSD 15.1 is not a
+# release of this program, so a second guest would not be broader coverage --
+# it would be a green tick for an artifact that can never be deployed.
+#
+# This is the opposite of the call reaper makes for itself, and for the same
+# reason: run the platform that would otherwise go unexercised. For reaper that
+# means adding FreeBSD; for merlin, FreeBSD is the only platform there is.
+
+schema = 1
+project = "merlin"
+
+# Host execution. FreeBSD has no container engine, so this is the only mode
+# available -- and it is also the mode we want: the NIF and the bundled ERTS
+# must be produced against the same base system the daemon will run on.
+#
+# The cost, stated plainly because the contract states it: the toolchain is not
+# manifest-pinned. `reaper/build.sh` compensates by asserting the Erlang and
+# Elixir versions it actually got and failing the build if they drift. That
+# turns an unpinnable dependency into a loud one.
+[[guests]]
+name = "freebsd-15.1"
+exec = "host"
+
+[build]
+# Installs the toolchain, asserts its versions, then builds. The template is a
+# pkgbase install: clang and the whole base system are present, but Erlang and
+# Elixir are not, so the tenant installs them. That is tenant business and the
+# framework never learns what any of it means.
+#
+# The honest cost of not having a purpose-built template, and the same trade
+# reaper's own manifest records for its apt-get line. Baking erlang+elixir into
+# template 9004 would remove ~2 minutes from every cold session; until someone
+# writes that runbook, this is where it lives.
+cmd = "sh reaper/build.sh"
+
+# Named by us, meaningless to the framework, and kept off tank/state so a
+# rollback never destroys the thing that makes the next iteration fast.
+#
+# `pkg` is load-bearing rather than an optimisation: the guest root disk has
+# roughly 3.3 GiB free, and Hex plus _build will exhaust it. Every one of these
+# is redirected onto the pool by build.sh via $REAPER_CACHE_*.
+cache = ["pkg", "hex", "mix", "deps", "build"]
+
+[run]
+# The tiered battery. Which tiers exist and in what order is the tenant's
+# business; this string is opaque to reaper.
+cmd = "sh reaper/tiers.sh"
+
+[sync]
+# _build and deps are built in the session's own caches. .venv is the legacy
+# Python tree's, is 22 MiB of nothing this loop needs, and is a different
+# platform's binaries in any case.
+exclude = [
+    "/_build/",
+    "/deps/",
+    "/.elixir_ls/",
+    "/doc/",
+    "/cover/",
+    "/.venv/",
+    "__pycache__/",
+    "erl_crash.dump",
+]
+
+[reset]
+# What tiers 6 and above accumulate: the broker's persistence directory, the
+# SQLite key store, and the fact snapshot. Rolling back between scenarios is
+# ~3 seconds against rebuilding a broker every time.
+datasets = ["state"]
+
+# The template is 2 cores. The Elixir compiler and the tier-9 simulated-house
+# harness both parallelise, and tier 8 exists specifically to put concurrent
+# load on the fact writer -- two cores would make that tier prove very little.
+[resources]
+cores = 4
+ram_gb = 8
+
+[profiles.dev]
+ttl = "2h"
+warm_cache = true
+
+[profiles.nightly]
+ttl = "12h"
+# Cold, so a warm cache can never be the reason a nightly run passed -- and so
+# the toolchain install path is exercised on a schedule rather than only on the
+# rare cold session.
+warm_cache = false
