@@ -435,7 +435,7 @@ defmodule Merlin.Config.File do
   # failure -- which is the whole reason this check exists.
   # Every zone a guard compares against must be a zone this house has.
   #
-  # `person.caleb.zone == :work` compiles, loads and is simply never true when
+  # `person.cal.zone == :work` compiles, loads and is simply never true when
   # no `:work` zone is declared. The rule then does nothing for ever, and the
   # house looks quiet rather than broken -- there is no error, no warning, and
   # nothing in any log to notice.

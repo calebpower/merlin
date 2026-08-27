@@ -10,7 +10,7 @@ defmodule Merlin.Rule do
       %{
         id: :lamps_off_when_away,
         desc: "When I leave, turn the living room lamps off.",
-        on: [{:leaves, [:person, :caleb, :zone], :home}],
+        on: [{:leaves, [:person, :cal, :zone], :home}],
         do: [{:set_group, :living_room_lamps, :off}]
       }
 

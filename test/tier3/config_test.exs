@@ -316,7 +316,7 @@ defmodule Merlin.ConfigSourceTest do
 
       for guard <- guards do
         for zone <- [:unknown, nil] do
-          refute Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :caleb, :zone] => zone}))),
+          refute Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :cal, :zone] => zone}))),
                  "a door moving with the phone at #{inspect(zone)} would raise an intruder alert"
         end
       end
@@ -329,11 +329,11 @@ defmodule Merlin.ConfigSourceTest do
       [guard] = guards_of(latch, :armed)
 
       for zone <- [:away, :workshop] do
-        assert Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :caleb, :zone] => zone}))),
+        assert Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :cal, :zone] => zone}))),
                "a door moving while at #{inspect(zone)} would NOT alert"
       end
 
-      refute Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :caleb, :zone] => :home}))),
+      refute Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :cal, :zone] => :home}))),
              "a door moving while home would alert"
     end
 
@@ -350,7 +350,7 @@ defmodule Merlin.ConfigSourceTest do
 
       dark =
         env_with(%{
-          [:person, :caleb, :zone] => :home,
+          [:person, :cal, :zone] => :home,
           [:vehicle, :car, :zone] => :unknown
         })
 
@@ -360,7 +360,7 @@ defmodule Merlin.ConfigSourceTest do
       # And it still answers plainly when it can see the car.
       seen =
         env_with(%{
-          [:person, :caleb, :zone] => :home,
+          [:person, :cal, :zone] => :home,
           [:vehicle, :car, :zone] => :away
         })
 
@@ -368,7 +368,7 @@ defmodule Merlin.ConfigSourceTest do
 
       home =
         env_with(%{
-          [:person, :caleb, :zone] => :home,
+          [:person, :cal, :zone] => :home,
           [:vehicle, :car, :zone] => :home
         })
 
@@ -399,7 +399,7 @@ defmodule Merlin.ConfigSourceTest do
 
         env =
           env_with(%{
-            [:person, :caleb, :zone] => :home,
+            [:person, :cal, :zone] => :home,
             [:vehicle, :car, :zone] => :unknown,
             [:vehicle, :car, :with_phone?] => false
           })
@@ -644,7 +644,7 @@ defmodule Merlin.ConfigSourceTest do
             id: :bad,
             desc: "d",
             on: [{:changes, [:x]}],
-            when: "person.caleb.zone == :work",
+            when: "person.cal.zone == :work",
             do: [{:log, :info, "x"}]
           }
         ]
@@ -665,7 +665,7 @@ defmodule Merlin.ConfigSourceTest do
             id: :ok_rule,
             desc: "d",
             on: [{:changes, [:x]}],
-            when: "person.caleb.zone == :home",
+            when: "person.cal.zone == :home",
             do: [{:log, :info, "x"}]
           }
         ]
@@ -687,7 +687,7 @@ defmodule Merlin.ConfigSourceTest do
             id: :ok_rule,
             desc: "d",
             on: [{:changes, [:x]}],
-            when: "person.caleb.zone != :unknown",
+            when: "person.cal.zone != :unknown",
             do: [{:log, :info, "x"}]
           }
         ]
@@ -713,7 +713,7 @@ defmodule Merlin.ConfigSourceTest do
             id: :ok_rule,
             desc: "d",
             on: [{:changes, [:x]}],
-            when: "person.caleb.zone == :away",
+            when: "person.cal.zone == :away",
             do: [{:log, :info, "x"}]
           }
         ]
@@ -736,7 +736,7 @@ defmodule Merlin.ConfigSourceTest do
             machine: %{
               initial: :a,
               states: %{
-                a: [%{on: {:changes, [:x]}, when: "person.caleb.zone == :gym", goto: :a}]
+                a: [%{on: {:changes, [:x]}, when: "person.cal.zone == :gym", goto: :a}]
               }
             }
           }
@@ -757,7 +757,7 @@ defmodule Merlin.ConfigSourceTest do
             id: :bad_list,
             desc: "d",
             on: [{:changes, [:x]}],
-            when: "person.caleb.zone in [:home, :atlantis]",
+            when: "person.cal.zone in [:home, :atlantis]",
             do: [{:log, :info, "x"}]
           }
         ]

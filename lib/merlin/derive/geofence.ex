@@ -3,7 +3,7 @@ defmodule Merlin.Derive.Geofence do
   Turns a position into a zone.
 
   This is the module half of "modules are abstraction layers, rules are data".
-  A rule never sees a coordinate; it says `person.caleb.zone == :home`. The
+  A rule never sees a coordinate; it says `person.cal.zone == :home`. The
   geometry, the hysteresis and the staleness handling live here, and the zone
   definitions live in config -- which is exactly the split you asked for:
   *"modules prevent me from needing to say 'the state of the car is away when

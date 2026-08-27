@@ -4,7 +4,7 @@ defmodule Merlin.Adapter do
 
   An adapter is the **only** place in the system where a topic string, a JSON
   field name, or a unit conversion may appear. Everything above it speaks in
-  paths and values: a rule says `person.caleb.zone == :home`, never
+  paths and values: a rule says `person.cal.zone == :home`, never
   `zigbee2mqtt/...` and never a GPS coordinate.
 
   ## Emissions, not writes

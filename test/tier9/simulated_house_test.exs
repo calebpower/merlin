@@ -103,7 +103,7 @@ defmodule Merlin.SimulatedHouseTest do
         entry(2,
           facts: %{
             [:rule, :intruder_latch, :state] => :fired,
-            [:person, :caleb, :zone] => :home
+            [:person, :cal, :zone] => :home
           }
         )
       ]
@@ -118,7 +118,7 @@ defmodule Merlin.SimulatedHouseTest do
         entry(2,
           facts: %{
             [:rule, :intruder_latch, :state] => :fired,
-            [:person, :caleb, :zone] => :work
+            [:person, :cal, :zone] => :work
           }
         )
       ]
@@ -132,7 +132,7 @@ defmodule Merlin.SimulatedHouseTest do
         entry(2,
           facts: %{
             [:rule, :intruder_latch, :state] => :fired,
-            [:person, :caleb, :zone] => :unknown
+            [:person, :cal, :zone] => :unknown
           }
         )
       ]
@@ -148,7 +148,7 @@ defmodule Merlin.SimulatedHouseTest do
         entry(2,
           facts: %{
             [:rule, :intruder_latch, :state] => :fired,
-            [:person, :caleb, :zone] => :away
+            [:person, :cal, :zone] => :away
           }
         )
       ]
@@ -161,13 +161,13 @@ defmodule Merlin.SimulatedHouseTest do
         entry(1,
           facts: %{
             [:rule, :intruder_latch, :state] => :fired,
-            [:person, :caleb, :zone] => :work
+            [:person, :cal, :zone] => :work
           }
         ),
         entry(2,
           facts: %{
             [:rule, :intruder_latch, :state] => :armed,
-            [:person, :caleb, :zone] => :work
+            [:person, :cal, :zone] => :work
           }
         )
       ]
@@ -181,13 +181,13 @@ defmodule Merlin.SimulatedHouseTest do
         entry(1,
           facts: %{
             [:rule, :intruder_latch, :state] => :fired,
-            [:person, :caleb, :zone] => :work
+            [:person, :cal, :zone] => :work
           }
         ),
         entry(2,
           facts: %{
             [:rule, :intruder_latch, :state] => :armed,
-            [:person, :caleb, :zone] => :home
+            [:person, :cal, :zone] => :home
           }
         )
       ]
@@ -273,7 +273,7 @@ defmodule Merlin.SimulatedHouseTest do
 
     test "a clean timeline violates nothing at all" do
       clean = [
-        entry(1, note: "a door opened", facts: %{[:person, :caleb, :zone] => :home}),
+        entry(1, note: "a door opened", facts: %{[:person, :cal, :zone] => :home}),
         publish(2, "zigbee2mqtt/living_room_lamps/set", ~s({"state":"ON"}),
           facts: %{[:sun, :state] => :night}
         )

@@ -139,9 +139,9 @@ defmodule Merlin.ExprTest do
 
   describe "fact reads" do
     test "dotted paths resolve through the environment" do
-      env = with_facts(%{[:person, :caleb, :zone] => :home})
-      assert ev("person.caleb.zone", env) == :home
-      assert ev("person.caleb.zone == :home", env) == true
+      env = with_facts(%{[:person, :cal, :zone] => :home})
+      assert ev("person.cal.zone", env) == :home
+      assert ev("person.cal.zone == :home", env) == true
     end
 
     test "a bare identifier is a one-segment path" do
@@ -153,17 +153,17 @@ defmodule Merlin.ExprTest do
     test "the user's own example expression" do
       env =
         with_facts(%{
-          [:person, :caleb, :zone] => :home,
+          [:person, :cal, :zone] => :home,
           [:vehicle, :car, :zone] => :work
         })
 
-      assert ev("person.caleb.zone == :home and vehicle.car.zone != :home", env) == true
+      assert ev("person.cal.zone == :home and vehicle.car.zone != :home", env) == true
     end
 
     test "an absent fact yields :unknown, and the example does not fire on it" do
-      env = with_facts(%{[:person, :caleb, :zone] => :home})
-      assert ev("person.caleb.zone == :home and vehicle.car.zone != :home", env) == :unknown
-      refute Expr.truthy?(ev("person.caleb.zone == :home and vehicle.car.zone != :home", env))
+      env = with_facts(%{[:person, :cal, :zone] => :home})
+      assert ev("person.cal.zone == :home and vehicle.car.zone != :home", env) == :unknown
+      refute Expr.truthy?(ev("person.cal.zone == :home and vehicle.car.zone != :home", env))
     end
   end
 
@@ -327,10 +327,10 @@ defmodule Merlin.ExprTest do
 
   describe "dependency extraction" do
     test "collects every fact path read" do
-      {:ok, expr} = Expr.compile("person.caleb.zone == :home and vehicle.car.zone != :home")
+      {:ok, expr} = Expr.compile("person.cal.zone == :home and vehicle.car.zone != :home")
 
       assert Enum.sort(Expr.deps(expr)) == [
-               [:person, :caleb, :zone],
+               [:person, :cal, :zone],
                [:vehicle, :car, :zone]
              ]
     end
@@ -408,7 +408,7 @@ defmodule Merlin.ExprTest do
     # and must keep working -- the fix must not have narrowed those too.
     test "ordinary fact paths of any depth still compile" do
       assert {:ok, _} = Expr.compile("a.b.c.d.e")
-      assert {:ok, _} = Expr.compile("person.caleb.zone")
+      assert {:ok, _} = Expr.compile("person.cal.zone")
     end
   end
 
@@ -419,7 +419,7 @@ defmodule Merlin.ExprTest do
     # exactly what it did to the intruder latch.
     test "== :unknown is refused, and says what to use instead" do
       assert {:error, {:unknown_literal_comparison, _, msg}} =
-               Expr.compile("person.caleb.zone == :unknown")
+               Expr.compile("person.cal.zone == :unknown")
 
       assert msg =~ "unknown?(x)"
       assert msg =~ "never be true"
@@ -427,20 +427,20 @@ defmodule Merlin.ExprTest do
 
     test "!= :unknown is refused, and points at defined?" do
       assert {:error, {:unknown_literal_comparison, _, msg}} =
-               Expr.compile("person.caleb.zone != :unknown")
+               Expr.compile("person.cal.zone != :unknown")
 
       assert msg =~ "defined?(x)"
     end
 
     test "refused on either side of the operator" do
       assert {:error, {:unknown_literal_comparison, _, _}} =
-               Expr.compile(":unknown == person.caleb.zone")
+               Expr.compile(":unknown == person.cal.zone")
     end
 
     test "refused inside a larger expression" do
       # Where it actually appeared: a conjunction whose other half is fine.
       assert {:error, {:unknown_literal_comparison, _, _}} =
-               Expr.compile("person.caleb.zone != :home and person.caleb.zone != :unknown")
+               Expr.compile("person.cal.zone != :home and person.cal.zone != :unknown")
     end
 
     # The replacements must work, or the refusal is just an obstruction.
@@ -448,8 +448,8 @@ defmodule Merlin.ExprTest do
       env = %{read: fn _ -> :unknown end, trigger: %{}, locals: %{}, group: fn _ -> [] end}
       known = %{read: fn _ -> :workshop end, trigger: %{}, locals: %{}, group: fn _ -> [] end}
 
-      {:ok, is_def} = Expr.compile("defined?(person.caleb.zone)")
-      {:ok, is_unk} = Expr.compile("unknown?(person.caleb.zone)")
+      {:ok, is_def} = Expr.compile("defined?(person.cal.zone)")
+      {:ok, is_unk} = Expr.compile("unknown?(person.cal.zone)")
 
       assert Expr.eval(is_def, env) == false
       assert Expr.eval(is_unk, env) == true
@@ -458,7 +458,7 @@ defmodule Merlin.ExprTest do
     end
 
     test "the guard the latch actually uses fires when out and declines when lost" do
-      {:ok, guard} = Expr.compile("defined?(person.caleb.zone) and person.caleb.zone != :home")
+      {:ok, guard} = Expr.compile("defined?(person.cal.zone) and person.cal.zone != :home")
 
       env = fn zone ->
         %{read: fn _ -> zone end, trigger: %{}, locals: %{}, group: fn _ -> [] end}
@@ -475,11 +475,11 @@ defmodule Merlin.ExprTest do
       # propagation answers :unknown, so the membership test can never be true
       # for the one value it was written to catch.
       assert {:error, {:unknown_literal_comparison, _, _}} =
-               Expr.compile("person.caleb.zone in [:home, :unknown]")
+               Expr.compile("person.cal.zone in [:home, :unknown]")
     end
 
     test "an `in` list of ordinary atoms still compiles and works" do
-      {:ok, expr} = Expr.compile("person.caleb.zone in [:home, :workshop]")
+      {:ok, expr} = Expr.compile("person.cal.zone in [:home, :workshop]")
 
       env = fn zone ->
         %{read: fn _ -> zone end, trigger: %{}, locals: %{}, group: fn _ -> [] end}
@@ -491,8 +491,8 @@ defmodule Merlin.ExprTest do
 
     # Comparing against other atoms is untouched.
     test "comparing against ordinary atoms still compiles" do
-      assert {:ok, _} = Expr.compile("person.caleb.zone == :home")
-      assert {:ok, _} = Expr.compile("person.caleb.zone != :away")
+      assert {:ok, _} = Expr.compile("person.cal.zone == :home")
+      assert {:ok, _} = Expr.compile("person.cal.zone != :away")
     end
   end
 end
