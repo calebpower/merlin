@@ -34,6 +34,31 @@ MERLIN_CONFIG=$(ls "$REL"/lib/merlin-*/priv/merlin.exs 2>/dev/null | head -1)
 export MERLIN_CONFIG
 say "config: $MERLIN_CONFIG"
 
+# The shipped config references secrets and does not contain them -- that is
+# the whole point of the split, and the daemon rightly refuses to boot without
+# them. Write a real 0600 file rather than relaxing the check, because the
+# permission refusal is itself something this tier must not disable.
+#
+# Every endpoint points at a closed loopback port. No DNS, no outbound traffic
+# from a disposable guest, and connection-refused arrives in milliseconds --
+# which makes the pollers a deliberate test of the failure path rather than an
+# accident: a house whose vendor API is unreachable must still work.
+MERLIN_SECRETS="$MERLIN_STATE_DIR/merlin.secrets.exs"
+export MERLIN_SECRETS
+cat > "$MERLIN_SECRETS" <<'SECRETS'
+%{
+  hapn_auth_endpoint: "http://127.0.0.1:1/token",
+  hapn_device_endpoint: "http://127.0.0.1:1/device",
+  hapn_client_id: "smoke",
+  hapn_client_secret: "smoke",
+  weather_endpoint: "http://127.0.0.1:1/weather",
+  weather_api_key: "smoke",
+  discord_webhook: "http://127.0.0.1:1/webhook"
+}
+SECRETS
+chmod 600 "$MERLIN_SECRETS"
+say "secrets: $MERLIN_SECRETS (0600, all endpoints closed loopback)"
+
 # The shipped config dry-runs by design, which would make every rule log
 # instead of act -- and this tier's whole job is to prove effects reach the
 # broker. Turn it off for the smoke run only.
@@ -54,6 +79,13 @@ export RELEASE_NODE="merlin-smoke@127.0.0.1"
 broker_up
 
 cleanup() {
+    # The daemon's own log is the only account of what it thought it was
+    # doing, and $REAPER_STATE is rolled back between tiers -- so a failure
+    # that does not preserve it is a failure nobody can diagnose. Always, not
+    # only on error: a passing run's log is what the next failure is compared
+    # against.
+    find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec cat {} + \
+        > "$REAPER_OUT/smoke-daemon.log" 2>/dev/null || true
     "$REL/bin/merlin" stop >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
@@ -359,6 +391,58 @@ say "posting a position just outside the entry radius but inside the exit radius
 post_position 35.9617 -83.9207
 await_zone ":unknown" || die "hysteresis let us enter on the exit radius (got $(zone_now))"
 say "hysteresis held: did not enter on the wider radius"
+
+# --------------------------------------------------------------------------
+# A poller whose endpoint is unreachable must degrade, not escalate. In the
+# Python a failing runner raised inside the thread and the traceback was
+# swallowed, so the only symptom was facts that silently stopped updating.
+#
+# Both pollers have been failing against a closed port for the whole run. By
+# now they must have logged it, must NOT have taken their supervisor with
+# them, and the rest of the house -- everything asserted above -- must have
+# gone on working. That last part is proven by this script having got here.
+# --------------------------------------------------------------------------
+say "checking a dead poller endpoint degrades rather than escalating"
+
+poll_log=$(find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec cat {} + 2>/dev/null)
+
+# EVERY poller, by name. The first version of this check looked for one
+# "poll failed" line anywhere and passed -- while the weather poller was in a
+# crash loop that shut the daemon down ninety seconds later. One healthy
+# integration masked a fatal one.
+for poller in hapn weather; do
+    printf '%s\n' "$poll_log" | grep -q "$poller: poll failed" \
+        || die "$poller never reported a failure -- it either did not poll, or it died instead"
+done
+say "both pollers reported their failure by name"
+
+# No poller may terminate. Not "no supervisor report" -- the actual crash was
+# logged as `GenServer ... terminating`, which the earlier pattern missed.
+if printf '%s\n' "$poll_log" | grep -qE "HttpPoll, :(hapn|weather)\}\} terminating|reached_max_restart"; then
+    die "a poller process terminated -- a failing vendor API must not restart, let alone escalate"
+fi
+
+# And the daemon itself must still be answering. A crash loop that has already
+# taken the application down leaves a log full of plausible warnings; only
+# asking the daemon distinguishes degraded from dead.
+# `rpc` runs INSIDE the live node, so it fails outright if the application is
+# gone -- which `eval` would not, since eval boots its own beam and would
+# happily report a healthy-looking empty world over a corpse.
+alive=$("$REL/bin/merlin" rpc \
+    'IO.puts(if Process.whereis(Merlin.Supervisor), do: "alive", else: "no-supervisor")' \
+    2>>"$REAPER_OUT/smoke-rpc.err" | tail -1)
+
+[ "$alive" = "alive" ] || {
+    say "rpc stderr:"; tail -20 "$REAPER_OUT/smoke-rpc.err" || true
+    die "the daemon stopped answering after the pollers failed (saw '$alive')"
+}
+say "daemon still alive and answering"
+
+# A token cannot have been issued by a closed port.
+if printf '%s\n' "$poll_log" | grep -q "token refreshed"; then
+    die "a token was refreshed against a closed port -- impossible; the stub is not what it claims"
+fi
+say "pollers degraded quietly and the house kept working"
 
 say "checking the key is absent from the daemon log"
 if find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec grep -l "$API_KEY" {} \; 2>/dev/null | grep -q .; then

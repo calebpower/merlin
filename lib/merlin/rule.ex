@@ -40,6 +40,7 @@ defmodule Merlin.Rule do
           | {:publish, binary(), term()}
           | {:set_fact, Merlin.Path.t(), term() | {:expr, binary()}}
           | {:log, atom(), binary() | {:expr, binary()}}
+          | {:notify, atom(), binary() | {:expr, binary()}}
 
   @type t :: %__MODULE__{
           id: atom(),
@@ -175,6 +176,10 @@ defmodule Merlin.Rule do
 
   defp compile_action({:set_fact, path, value}) when is_list(path) do
     with {:ok, v} <- compile_value(value), do: {:ok, {:set_fact, path, v}}
+  end
+
+  defp compile_action({:notify, channel, message}) when is_atom(channel) do
+    with {:ok, m} <- compile_value(message), do: {:ok, {:notify, channel, m}}
   end
 
   defp compile_action({:log, level, message})

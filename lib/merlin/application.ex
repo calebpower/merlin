@@ -87,6 +87,29 @@ defmodule Merlin.Application do
   # because everything looks healthy.
   defp load_config! do
     if Merlin.Config.start_mqtt?() do
+      # Secrets first: the config references them, and the validator reports
+      # every missing one at once rather than one per restart.
+      case Merlin.Secrets.load() do
+        :ok ->
+          :ok
+
+        {:error, {:permissions, file, mode} = reason} ->
+          IO.puts(:stderr, """
+          merlin: refusing to start
+
+            #{file} is mode #{inspect(mode, base: :octal)} -- it must not be readable
+            by group or other. Run: chmod 600 #{file}
+
+          #{inspect(reason)}
+          """)
+
+          System.halt(2)
+
+        {:error, reason} ->
+          IO.puts(:stderr, "merlin: could not load secrets: #{inspect(reason)}\n")
+          System.halt(2)
+      end
+
       case Merlin.Config.load() do
         :ok ->
           :ok

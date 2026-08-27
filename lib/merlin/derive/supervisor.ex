@@ -27,6 +27,7 @@ defmodule Merlin.Derive.Supervisor do
         :geofence -> Merlin.Derive.Geofence
         :expr -> Merlin.Derive.Expr
         :sun -> Merlin.Derive.Sun
+        :http_poll -> Merlin.Source.HttpPoll
       end
 
     Supervisor.child_spec({module, spec}, id: {module, spec.id})

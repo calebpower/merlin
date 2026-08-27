@@ -210,6 +210,58 @@
   ],
 
   derived: [
+    # --- the vehicle tracker (hapn_tracker.py) ------------------------------
+    # All ten fields, not the three the Python actually used. It captured
+    # speed, heading, mileage, battery, accuracy, send time and street address
+    # and then read none of them -- which is why the "better vehicle rule" you
+    # chose at planning was not expressible: the data was there and discarded.
+    #
+    # Credentials are secret references. merlin.exs is a document about the
+    # house; merlin.secrets.exs is the thing nobody else can read.
+    %{
+      id: :hapn,
+      kind: :http_poll,
+      every: {2, :minute},
+      auth: [
+        url: {:secret, :hapn_auth_endpoint},
+        client_id: {:secret, :hapn_client_id},
+        client_secret: {:secret, :hapn_client_secret}
+      ],
+      request: [url: {:secret, :hapn_device_endpoint}, headers: [{"accept", "application/json"}]],
+      root: "result",
+      # A tracker silent for twenty minutes is not evidence of the car being
+      # anywhere. The Python froze the last position forever.
+      stale_after_ms: 1_200_000,
+      facts: [
+        %{path: [:vehicle, :car, :lat], from: ["latitude"]},
+        %{path: [:vehicle, :car, :lon], from: ["longitude"]},
+        %{path: [:vehicle, :car, :fix_at], from: ["gpsUTCTime"]},
+        %{path: [:vehicle, :car, :accuracy_m], from: ["gpsAccuracy"]},
+        %{path: [:vehicle, :car, :battery_pct], from: ["batteryPercentage"]},
+        %{path: [:vehicle, :car, :reported_at], from: ["sendTime"]},
+        %{path: [:vehicle, :car, :address], from: ["address"]},
+        %{path: [:vehicle, :car, :heading_deg], from: ["azimuth"]},
+        %{path: [:vehicle, :car, :odometer_mi], from: ["odoMileage"]},
+        %{path: [:vehicle, :car, :speed_mph], from: ["speed"]}
+      ]
+    },
+
+    # --- weather (weather.py) -----------------------------------------------
+    # Kept, and now with a consumer: the sun fact decides "after dark", and
+    # this will feed the dashboard at M9. In the Python SNS_EXT_CLIMATE_TEMP
+    # had no reader at all.
+    %{
+      id: :weather,
+      kind: :http_poll,
+      every: {5, :minute},
+      request: [
+        url: {:secret, :weather_endpoint},
+        params: %{"key" => {:secret, :weather_api_key}}
+      ],
+      stale_after_ms: 1_800_000,
+      facts: [%{path: [:weather, :exterior, :temp_f], from: ["temp"]}]
+    },
+
     # --- the geofences ------------------------------------------------------
     # Modules, because this is geometry. Zone definitions are data, because
     # they are facts about your house.
@@ -356,13 +408,15 @@
       id: :vehicle_unaccounted_alert,
       desc: "Log when the car is in no known zone and not with my phone.",
       on: [{:enters, [:vehicle, :car, :unaccounted?], true}],
-      do: [{:log, :warning, "vehicle unaccounted for: not in a known zone and not with the phone"}]
+      # :log, not :discord. This path has no operational history. After a
+      # fortnight of watching the log, change one word.
+      do: [{:notify, :log, "vehicle unaccounted for: not in a known zone and not with the phone"}]
     },
     %{
       id: :vehicle_away_while_home_alert,
       desc: "Log when I am home and the car is not.",
       on: [{:enters, [:vehicle, :car, :away_while_home?], true}],
-      do: [{:log, :warning, "vehicle is away while I am home"}]
+      do: [{:notify, :log, "vehicle is away while I am home"}]
     },
 
     # --- the printer power sequence (3dprinter_kobra_neo.py) ---------------
@@ -530,7 +584,9 @@
               # Enumerated rather than `!= :home`, so an :unknown zone -- we
               # lost the phone -- cannot fire an intruder alert.
               when: "person.caleb.zone == :work or person.caleb.zone == :gym",
-              do: [{:log, :warning, "unexpected activity at home while I am away"}],
+              # Also :log. alerts.py gated this on a flag bug 2 made
+              # unreachable, so it has never fired in production either.
+              do: [{:notify, :log, "unexpected activity at home while I am away"}],
               goto: :fired
             }
           ],

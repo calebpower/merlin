@@ -98,5 +98,37 @@ else
     fails=$((fails + 1))
 fi
 
+# ---------------------------------------------------------------------------
+# Every test file must be claimed by the tier it lives in.
+#
+# The tiers select by tag (`--only tier1`). A file with no @moduletag matches
+# no tier, so it is excluded from every run -- it executes nowhere, reports
+# nothing, and the battery stays green. That is the same defect as a skipped
+# tier counting as a pass, one level down, and it has now happened once: a
+# secrets test file sat unrun while its tier reported success.
+#
+# Checked here rather than in Elixir because the failure is that ExUnit never
+# loads the file at all -- the check has to live outside the thing it checks.
+# ---------------------------------------------------------------------------
+mistagged=0
+for dir in test/tier*/; do
+    [ -d "$dir" ] || continue
+    n=$(basename "$dir" | sed 's/^tier//')
+
+    for f in "$dir"*_test.exs; do
+        [ -f "$f" ] || continue
+        if ! grep -q "@moduletag :tier$n" "$f"; then
+            printf '  FAIL  %s declares no @moduletag :tier%s -- it would run in NO tier\n' "$f" "$n"
+            mistagged=$((mistagged + 1))
+        fi
+    done
+done
+
+if [ "$mistagged" -eq 0 ]; then
+    printf '  ok    every test file is claimed by its tier\n'
+else
+    fails=$((fails + mistagged))
+fi
+
 say "$fails failure(s)"
 [ "$fails" -eq 0 ] || exit 1

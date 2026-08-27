@@ -99,7 +99,9 @@ defmodule Merlin.Config.File do
         groups_errors(term),
         sources_errors(term),
         zones_errors(term),
-        derived_errors(term)
+        derived_errors(term),
+        producer_errors(term),
+        secret_errors(term)
       ])
 
     case {errors, compile_rules(term)} do
@@ -207,6 +209,57 @@ defmodule Merlin.Config.File do
   defp valid_radius?(n) when is_number(n) and n > 0, do: true
   defp valid_radius?(_), do: false
 
+  @doc """
+  The fact paths a derived spec writes.
+
+  Single-output kinds declare `out:`; a poller declares a `facts:` list and
+  writes all of them. Both are "what does this produce", and asking that
+  question in one place is what lets the collision check below see a poller's
+  ten paths as well as an expression's one.
+  """
+  @spec produced_paths(map()) :: {:ok, [[atom()]]} | :error
+  def produced_paths(%{kind: :http_poll} = d) do
+    facts = Map.get(d, :facts, [])
+
+    if is_list(facts) and facts != [] and Enum.all?(facts, &is_list(Map.get(&1, :path))) do
+      {:ok, Enum.map(facts, & &1.path)}
+    else
+      :error
+    end
+  end
+
+  def produced_paths(d) do
+    case Map.get(d, :out) do
+      out when is_list(out) -> {:ok, [out]}
+      _ -> :error
+    end
+  end
+
+
+  # Two producers writing one path is the defect that presents as a fact
+  # flickering between two values with no rule to blame, and it is invisible
+  # in review because the two declarations are hundreds of lines apart. It
+  # became reachable the moment a poller could declare ten paths at once.
+  defp producer_errors(term) do
+    term
+    |> Map.get(:derived, [])
+    |> Enum.filter(&is_map/1)
+    |> Enum.flat_map(fn d ->
+      case produced_paths(d) do
+        {:ok, paths} -> Enum.map(paths, &{&1, Map.get(d, :id)})
+        :error -> []
+      end
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.flat_map(fn
+      {_path, [_only]} ->
+        []
+
+      {path, ids} ->
+        [{:duplicate_producer, Merlin.Path.to_string(path), Enum.sort(ids)}]
+    end)
+  end
+
   defp derived_errors(term) do
     zone_ids = term |> Map.get(:zones, []) |> Enum.map(& &1[:id]) |> MapSet.new()
 
@@ -220,10 +273,10 @@ defmodule Merlin.Config.File do
         not is_atom(Map.get(d, :id)) ->
           [{:derived_missing_id, d}]
 
-        Map.get(d, :kind) not in [:geofence, :expr, :sun] ->
+        Map.get(d, :kind) not in [:geofence, :expr, :sun, :http_poll] ->
           [{:derived_bad_kind, d[:id], Map.get(d, :kind)}]
 
-        not is_list(Map.get(d, :out)) ->
+        produced_paths(d) == :error ->
           [{:derived_missing_out, d[:id]}]
 
         d.kind == :expr ->
@@ -271,6 +324,15 @@ defmodule Merlin.Config.File do
   # A config entry with a :machine key is a stateful rule; everything else is
   # stateless. One list, so the ordering in the file is the ordering a reader
   # sees, rather than two lists that must be mentally interleaved.
+  # Every secret the config names must be defined. Reported together, because
+  # discovering them one restart at a time is how a cutover window gets eaten.
+  defp secret_errors(term) do
+    case Merlin.Secrets.missing(term) do
+      [] -> []
+      names -> Enum.map(names, &{:missing_secret, &1})
+    end
+  end
+
   defp compile_rules(term) do
     {ok, errors} =
       term
@@ -340,6 +402,9 @@ defmodule Merlin.Config.File do
 
   defp describe({:unknown_group, rule_id, group, known}),
     do: "rule #{rule_id} commands unknown group #{inspect(group)} (known: #{inspect(known)})"
+
+  defp describe({:missing_secret, name}),
+    do: "secret #{inspect(name)} is referenced by the config but not defined in #{Merlin.Secrets.path()}"
 
   defp describe({:derived_bad_hold, id, reason}),
     do: "derived fact #{id}: bad hold: #{inspect(reason)} (expected {:true_for, {n, unit}})"

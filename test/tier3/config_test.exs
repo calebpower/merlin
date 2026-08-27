@@ -38,8 +38,35 @@ defmodule Merlin.ConfigSourceTest do
   # The real file, not a fixture.
   @config_path Path.expand("../../priv/merlin.exs", __DIR__)
 
+  # The shipped config references secrets it does not contain -- that is the
+  # point of the split. These placeholders let the structural assertions run;
+  # separate tests below prove the validator DOES refuse a config whose
+  # secrets are missing.
+  @secrets %{
+    hapn_auth_endpoint: "https://example/token",
+    hapn_device_endpoint: "https://example/device",
+    hapn_client_id: "id",
+    hapn_client_secret: "secret",
+    weather_endpoint: "https://example/weather",
+    weather_api_key: "key",
+    discord_webhook: "https://example/webhook"
+  }
+
+  # Reinstalled before EVERY test, not once in setup_all. Secrets live in
+  # :persistent_term, which is global: a test that deliberately empties them
+  # would otherwise corrupt whichever tests ExUnit shuffled after it, and the
+  # failure would move with the seed. Per-test restoration confines the blast
+  # radius to the test that asked for it.
+  setup do
+    Merlin.Secrets.put(@secrets)
+    on_exit(fn -> Merlin.Secrets.put(@secrets) end)
+    :ok
+  end
+
   setup_all do
     assert File.exists?(@config_path), "shipped config is missing: #{@config_path}"
+    Merlin.Secrets.put(@secrets)
+
     {:ok, config} = Config.File.load(@config_path)
     {raw, _bindings} = Code.eval_file(@config_path)
     %{config: config, raw: raw}
@@ -132,6 +159,55 @@ defmodule Merlin.ConfigSourceTest do
       end
     end
 
+    test "the vehicle poller declares all ten HAPN fields", %{config: config} do
+      # The Python captured ten and read three. Seven fields were fetched
+      # every two minutes and discarded, which is why the vehicle rule you
+      # wanted could not be written: the data was arriving already.
+      hapn = Enum.find(config.derived, &(&1.id == :hapn))
+      assert hapn, "the vehicle poller is missing"
+
+      assert {:ok, paths} = Config.File.produced_paths(hapn)
+      assert length(paths) == 10
+
+      for leaf <- [
+            :lat,
+            :lon,
+            :fix_at,
+            :accuracy_m,
+            :battery_pct,
+            :reported_at,
+            :address,
+            :heading_deg,
+            :odometer_mi,
+            :speed_mph
+          ] do
+        assert [:vehicle, :car, leaf] in paths, "vehicle.car.#{leaf} is not declared"
+      end
+    end
+
+    test "every poller sets stale_after_ms", %{config: config} do
+      # A poller without it freezes its last reading forever on failure, which
+      # is exactly how the Python reported the car parked at home while it was
+      # being driven away. Staleness must be an honest :unknown.
+      for d <- config.derived, d.kind == :http_poll do
+        assert is_integer(Map.get(d, :stale_after_ms)),
+               "poller #{d.id} would freeze its facts on failure"
+      end
+    end
+
+    test "every secret the shipped config references is in the example file", %{raw: raw} do
+      # Otherwise the first thing a fresh install learns is that the example
+      # is incomplete, one missing key per restart.
+      example = Path.join(Path.dirname(@config_path), "merlin.secrets.exs.example")
+      assert File.exists?(example), "the secrets example is missing"
+
+      {defined, _} = Code.eval_file(example)
+
+      for name <- Enum.uniq(Merlin.Secrets.referenced(raw)) do
+        assert Map.has_key?(defined, name), "secret #{inspect(name)} is not in the example file"
+      end
+    end
+
     test "ships with dry_run enabled", %{config: config} do
       # Deliberate. The first thing this daemon does against the real broker
       # should be to say what it would have done. Three of the rules it
@@ -201,6 +277,83 @@ defmodule Merlin.ConfigSourceTest do
 
       assert {:error, errors} = Config.File.validate(config)
       assert length(errors) >= 2, "a boot report naming one of several problems costs a restart each"
+    end
+
+    test "a config referencing an undefined secret is refused" do
+      # And every missing name is reported together: finding them one restart
+      # at a time is how a cutover window gets eaten.
+      Merlin.Secrets.put(%{})
+
+      config = %{
+        groups: [],
+        rules: [],
+        sources: [],
+        derived: [
+          %{id: :p, kind: :http_poll, out: [:x], request: [url: {:secret, :nope}]},
+          %{id: :q, kind: :http_poll, out: [:y], request: [url: {:secret, :also_nope}]}
+        ]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert Enum.member?(errors, {:missing_secret, :nope})
+      assert Enum.member?(errors, {:missing_secret, :also_nope})
+    end
+
+    test "two derived facts writing the same path are refused" do
+      config = %{
+        groups: [],
+        rules: [],
+        sources: [],
+        derived: [
+          %{id: :a, kind: :expr, out: [:x, :y], compute: "1"},
+          %{id: :b, kind: :expr, out: [:x, :y], compute: "2"}
+        ]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert {:duplicate_producer, "x.y", [:a, :b]} in errors
+    end
+
+    test "a poller colliding with an expression is refused" do
+      # The case that only exists because a poller declares many paths: the
+      # collision is with ONE of ten, and reading the two declarations side by
+      # side would not show it.
+      config = %{
+        groups: [],
+        rules: [],
+        sources: [],
+        derived: [
+          %{id: :e, kind: :expr, out: [:vehicle, :car, :lat], compute: "1"},
+          %{
+            id: :p,
+            kind: :http_poll,
+            request: [url: "https://example"],
+            facts: [
+              %{path: [:vehicle, :car, :lon], from: ["lon"]},
+              %{path: [:vehicle, :car, :lat], from: ["lat"]}
+            ]
+          }
+        ]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert {:duplicate_producer, "vehicle.car.lat", [:e, :p]} in errors
+      # ...and the path that does NOT collide is not reported.
+      refute Enum.any?(errors, &match?({:duplicate_producer, "vehicle.car.lon", _}, &1))
+    end
+
+    test "a poller declaring no facts is refused" do
+      # It would start, poll on schedule, decode the response and write
+      # nothing -- a silent no-op that looks healthy in every log.
+      config = %{
+        groups: [],
+        rules: [],
+        sources: [],
+        derived: [%{id: :p, kind: :http_poll, request: [url: "https://example"], facts: []}]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert {:derived_missing_out, :p} in errors
     end
 
     test "a missing file is an error, not an empty config" do

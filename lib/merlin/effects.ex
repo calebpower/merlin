@@ -34,6 +34,7 @@ defmodule Merlin.Effects do
           | {:publish, binary(), binary(), keyword()}
           | {:set_fact, Merlin.Path.t(), term()}
           | {:log, atom(), binary()}
+          | {:notify, atom(), binary()}
 
   @doc """
   Resolve a rule's actions against an evaluation environment.
@@ -97,6 +98,7 @@ defmodule Merlin.Effects do
     do: "set #{Merlin.Path.to_string(path)} -> #{inspect(value)}"
 
   def describe({:log, level, message}), do: "log #{level}: #{message}"
+  def describe({:notify, channel, message}), do: "notify #{channel}: #{message}"
 
   # --- resolution -----------------------------------------------------------
 
@@ -120,6 +122,10 @@ defmodule Merlin.Effects do
 
   defp resolve_action({:set_fact, path, v}, env, _groups) do
     with {:ok, resolved} <- value(v, env), do: {:ok, {:set_fact, path, resolved}}
+  end
+
+  defp resolve_action({:notify, channel, message}, env, _groups) do
+    with {:ok, m} <- value(message, env), do: {:ok, {:notify, channel, to_payload(m)}}
   end
 
   defp resolve_action({:log, level, message}, env, _groups) do
@@ -167,6 +173,23 @@ defmodule Merlin.Effects do
     # rule reacting to a change writes at that change's depth + 1, so a cycle
     # between two rules trips the ceiling instead of spinning forever.
     World.put(path, value, Keyword.merge(cause, source: {:rule, rule}))
+  end
+
+  defp do_perform({:notify, :discord, message}, rule, _cause) do
+    case Merlin.Notify.Discord.send(message) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("rule #{rule}: discord notify failed: #{inspect(reason)}")
+    end
+  end
+
+  # A channel that resolves to the log is how an alerting rule ships before it
+  # is trusted to wake anyone. Both vehicle rules and the intruder latch use it.
+  defp do_perform({:notify, :log, message}, rule, _cause) do
+    Logger.warning("[notify] #{message}#{rule_suffix(rule)}")
+  end
+
+  defp do_perform({:notify, channel, message}, rule, _cause) do
+    Logger.warning("rule #{rule}: unknown notify channel #{inspect(channel)}: #{message}")
   end
 
   defp do_perform({:log, level, message}, rule, _cause) do

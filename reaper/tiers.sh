@@ -76,7 +76,7 @@ tier 4 "server contract" mix test --only tier4 --warnings-as-errors
 # ---------------------------------------------------------------------------
 # Tiers 5-9: need the broker and/or the full stack.
 # ---------------------------------------------------------------------------
-skip 5 "daemon vs fakes"    "Mox over Merlin.MQTT.Client; lands M2/M6"
+tier 5 "daemon vs fakes" mix test --only tier5 --warnings-as-errors
 tier 6 "full stack (smoke)" sh reaper/smoke.sh
 tier 7 "seeded fuzzing" mix test --only tier7 --warnings-as-errors
 tier 8 "concurrency" mix test --only tier8 --warnings-as-errors
