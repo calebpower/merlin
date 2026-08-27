@@ -301,6 +301,65 @@ esac
 
 # The leak that actually happened: api.py logged the request body, and the key
 # travels in it.
+# ---------------------------------------------------------------------------
+# The M4 demonstrable: the geofence, in the running daemon.
+#
+# Bug 2 executing for the first time. user_location.py:124 produced "" where
+# False was meant and every consumer tested `is False`, so being outside every
+# zone was indistinguishable from being home and the away path never ran.
+# ---------------------------------------------------------------------------
+post_position() {
+    MERLIN_SMOKE_KEY="$API_KEY" MERLIN_SMOKE_PORT="$MERLIN_PUBLIC_PORT" \
+    MERLIN_SMOKE_LAT="$1" MERLIN_SMOKE_LON="$2" \
+    "$REL/bin/merlin" eval '
+      :inets.start()
+      body = Jason.encode!(%{
+        challenge: System.get_env("MERLIN_SMOKE_KEY"),
+        status: %{
+          gps_latitude: String.to_float(System.get_env("MERLIN_SMOKE_LAT")),
+          gps_longitude: String.to_float(System.get_env("MERLIN_SMOKE_LON")),
+          gps_accuracy: 8
+        }
+      })
+      url = ~c"http://127.0.0.1:#{System.get_env("MERLIN_SMOKE_PORT")}/snitch"
+      :httpc.request(:post, {url, [], ~c"application/json", body}, [], [])
+    ' >/dev/null 2>&1 || true
+}
+
+zone_now() {
+    "$REL/bin/merlin" rpc \
+        'IO.puts(inspect(Merlin.World.get([:person, :caleb, :zone])))' 2>>"$rpc_err" | tail -1
+}
+
+await_zone() {
+    want=$1
+    i=0
+    while [ "$i" -lt 25 ]; do
+        got=$(zone_now)
+        [ "$got" = "$want" ] && return 0
+        i=$((i + 1))
+        sleep 0.2
+    done
+    return 1
+}
+
+say "posting a position at the centre of the home zone"
+post_position 35.9606 -83.9207
+await_zone ":home" || die "expected zone :home, got $(zone_now)"
+say "zone resolved to :home"
+
+say "posting a position far outside every zone"
+post_position 40.7128 -74.0060
+await_zone ":unknown" || die "expected zone :unknown, got $(zone_now)"
+say "zone resolved to :unknown -- NOT :home, and not false (bug 2 is fixed)"
+
+say "posting a position just outside the entry radius but inside the exit radius"
+# ~130m north of home: beyond the 400ft entry radius, within the 1.25x exit
+# radius. Coming from :unknown, hysteresis must keep us OUT.
+post_position 35.9617 -83.9207
+await_zone ":unknown" || die "hysteresis let us enter on the exit radius (got $(zone_now))"
+say "hysteresis held: did not enter on the wider radius"
+
 say "checking the key is absent from the daemon log"
 if find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec grep -l "$API_KEY" {} \; 2>/dev/null | grep -q .; then
     die "the API key appears in the daemon log -- api.py:31 all over again"

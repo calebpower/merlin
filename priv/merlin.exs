@@ -18,6 +18,23 @@
   # done. Three of the rules it replaces have never fired in production.
   dry_run: true,
 
+  # Zones each carry their own size, and leaving requires travelling further
+  # than arriving did. The Python had ONE 0.25-mile constant serving as every
+  # geofence radius and as the phone-to-vehicle distance, with no hysteresis at
+  # all -- which was survivable only because the away path was dead code.
+  #
+  # Coordinates are approximate placeholders. Replace with the real ones before
+  # cutover; nothing here is a secret, but nothing here is right either.
+  zones: [
+    %{id: :home, center: {35.9606, -83.9207}, radius: {400, :ft}, hysteresis: 1.25},
+    %{id: :work, center: {35.9132, -84.3110}, radius: {0.25, :mi}},
+    %{id: :gym, center: {35.9401, -83.9951}, radius: {600, :ft}}
+  ],
+
+  # Separate from any zone radius: "is the car with my phone" is a different
+  # question from "how big is my house".
+  colocation_distance: {0.25, :mi},
+
   groups: [
     # What livingroom_lamps.py had implicitly: two per-lamp state topics it
     # tracked, and one zigbee2mqtt *group* topic it published to. Naming it
@@ -139,6 +156,67 @@
     }
   ],
 
+  derived: [
+    # --- the geofences ------------------------------------------------------
+    # Modules, because this is geometry. Zone definitions are data, because
+    # they are facts about your house.
+    %{
+      id: :caleb_presence,
+      kind: :geofence,
+      lat: [:person, :caleb, :lat],
+      lon: [:person, :caleb, :lon],
+      accuracy: [:person, :caleb, :accuracy_m],
+      max_accuracy_m: 100,
+      out: [:person, :caleb, :zone],
+      out_position: [:person, :caleb, :position],
+      # A phone silent for half an hour is not evidence of being anywhere.
+      # The Python recorded a checkin timestamp and never read it.
+      stale_after_ms: 1_800_000
+    },
+    %{
+      id: :vehicle_presence,
+      kind: :geofence,
+      lat: [:vehicle, :car, :lat],
+      lon: [:vehicle, :car, :lon],
+      accuracy: [:vehicle, :car, :accuracy_m],
+      max_accuracy_m: 100,
+      out: [:vehicle, :car, :zone],
+      out_position: [:vehicle, :car, :position],
+      stale_after_ms: 1_200_000
+    },
+
+    # --- daylight -----------------------------------------------------------
+    %{id: :sun, kind: :sun, lat: 35.9606, lon: -83.9207, out: [:sun, :state]},
+
+    # --- the vehicle question, as data -------------------------------------
+    # Your decision at planning: departure-without-phone as the primary signal,
+    # motion-while-parked as a fast path. Both are declared here as facts about
+    # the world; whether either is worth waking you up is a rule's business.
+    #
+    # NOTE: neither carries a sustained-for window yet. "true for two minutes
+    # before it counts" needs a timer, and timers arrive with the gen_statem
+    # executors at M5. Until then these are twitchier than they should be,
+    # which is why both alerting rules below log rather than notify.
+    %{
+      id: :vehicle_with_phone,
+      kind: :expr,
+      out: [:vehicle, :car, :with_phone?],
+      compute: "within?(vehicle.car.position, person.caleb.position, 402.34)"
+    },
+    %{
+      id: :vehicle_unaccounted,
+      kind: :expr,
+      out: [:vehicle, :car, :unaccounted?],
+      compute: "unknown?(vehicle.car.zone) and vehicle.car.with_phone? == false"
+    },
+    %{
+      id: :vehicle_away_while_home,
+      kind: :expr,
+      out: [:vehicle, :car, :away_while_home?],
+      compute: "person.caleb.zone == :home and vehicle.car.zone != :home"
+    }
+  ],
+
   rules: [
     # --- echo parity -------------------------------------------------------
     # Moved out of the adapter and into data, as promised at M1. The adapter
@@ -170,6 +248,53 @@
       on: [{:receives, [:button, :living_room, :pressed]}],
       when: "trigger.value == :double",
       do: [{:set_group, :living_room_lamps, :off}]
+    },
+
+    # --- presence -----------------------------------------------------------
+    # The rule that has NEVER fired in production. user_location.py:124 wrote
+    # "" where False was meant and every consumer tested `is False`, so this
+    # path was dead code for the life of the Python daemon. It executes for the
+    # first time here.
+    #
+    # Your decision: sustained absence, not the instant the flag flips. The
+    # sustained-for window needs a timer (M5); until then hysteresis on the
+    # zone boundary is what stops it flapping, which is the larger half of the
+    # problem anyway.
+    %{
+      id: :lamps_off_when_away,
+      desc: "When I leave, turn the living room lamps off.",
+      on: [{:leaves, [:person, :caleb, :zone], :home}],
+      # Only on a real departure. Leaving :home for :unknown means we lost the
+      # phone, not that you went out.
+      when: "defined?(person.caleb.zone)",
+      do: [{:set_group, :living_room_lamps, :off}]
+    },
+
+    # Your decision: on ARRIVAL, and only after dark. `enters` is an edge, so
+    # this cannot fire merely because you are already home.
+    %{
+      id: :lamps_on_when_arriving_after_dark,
+      desc: "Turn the living room lamps on when I arrive home after dark.",
+      on: [{:enters, [:person, :caleb, :zone], :home}],
+      when: "sun.state == :night",
+      do: [{:set_group, :living_room_lamps, :on}]
+    },
+
+    # --- the vehicle --------------------------------------------------------
+    # Pointed at :log deliberately. These fire on paths with no operational
+    # history, and without the M5 hold windows they will be twitchy. Watch the
+    # log for a fortnight, then swap :log for a notifier.
+    %{
+      id: :vehicle_unaccounted_alert,
+      desc: "Log when the car is in no known zone and not with my phone.",
+      on: [{:enters, [:vehicle, :car, :unaccounted?], true}],
+      do: [{:log, :warning, "vehicle unaccounted for: not in a known zone and not with the phone"}]
+    },
+    %{
+      id: :vehicle_away_while_home_alert,
+      desc: "Log when I am home and the car is not.",
+      on: [{:enters, [:vehicle, :car, :away_while_home?], true}],
+      do: [{:log, :warning, "vehicle is away while I am home"}]
     },
 
     # --- doors -------------------------------------------------------------

@@ -54,7 +54,13 @@ defmodule Merlin.Application do
   # for reasons unrelated to the code under test.
   defp mqtt_children do
     if Merlin.Config.start_mqtt?(),
-      do: [Merlin.MQTT.Connection, Merlin.Rules.Engine],
+      do: [
+        Merlin.MQTT.Connection,
+        # Derived facts sit between the adapters and the rules: they consume
+        # raw observations and produce the semantics rules are written against.
+        Merlin.Derive.Supervisor,
+        Merlin.Rules.Engine
+      ],
       else: []
   end
 

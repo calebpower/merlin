@@ -110,6 +110,26 @@ defmodule Merlin.Config do
   @spec sources() :: [map()]
   def sources, do: loaded()[:sources] || []
 
+  @doc "Zone definitions, keyed by id, with radii resolved to metres."
+  @spec zones() :: %{atom() => map()}
+  def zones, do: loaded()[:zones] || %{}
+
+  @doc """
+  How close the phone and the vehicle must be to count as together.
+
+  Deliberately separate from any zone radius. In the Python one 0.25-mile
+  constant served as every geofence radius AND this distance -- two unrelated
+  quantities forced to share a value.
+  """
+  @spec colocation_distance_m() :: float()
+  def colocation_distance_m do
+    Merlin.Geo.to_meters(loaded()[:colocation_distance] || {0.25, :mi})
+  end
+
+  @doc "Derived-fact specifications."
+  @spec derived() :: [map()]
+  def derived, do: loaded()[:derived] || []
+
   @doc "Compiled rules."
   @spec rules() :: [Merlin.Rule.t()]
   def rules, do: loaded()[:rules] || []

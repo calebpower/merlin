@@ -97,7 +97,9 @@ defmodule Merlin.Config.File do
       List.flatten([
         plain_data_errors(term),
         groups_errors(term),
-        sources_errors(term)
+        sources_errors(term),
+        zones_errors(term),
+        derived_errors(term)
       ])
 
     case {errors, compile_rules(term)} do
@@ -175,6 +177,78 @@ defmodule Merlin.Config.File do
     end)
   end
 
+  defp zones_errors(term) do
+    term
+    |> Map.get(:zones, [])
+    |> Enum.flat_map(fn zone ->
+      cond do
+        not is_map(zone) -> [{:bad_zone, zone}]
+        not is_atom(Map.get(zone, :id)) -> [{:zone_missing_id, zone}]
+        not valid_point?(Map.get(zone, :center)) -> [{:zone_bad_center, zone[:id]}]
+        not valid_radius?(Map.get(zone, :radius)) -> [{:zone_bad_radius, zone[:id]}]
+        Map.get(zone, :hysteresis, 1.25) < 1.0 -> [{:zone_hysteresis_below_one, zone[:id]}]
+        true -> []
+      end
+    end)
+  end
+
+  # A hysteresis below 1.0 would make leaving EASIER than arriving, which
+  # inverts the anti-flap and is almost certainly a typo rather than intent.
+  defp valid_point?({lat, lon})
+       when is_number(lat) and is_number(lon) and lat >= -90 and lat <= 90 and lon >= -180 and
+              lon <= 180,
+       do: true
+
+  defp valid_point?(_), do: false
+
+  defp valid_radius?({n, unit}) when is_number(n) and n > 0 and unit in [:m, :ft, :mi, :km],
+    do: true
+
+  defp valid_radius?(n) when is_number(n) and n > 0, do: true
+  defp valid_radius?(_), do: false
+
+  defp derived_errors(term) do
+    zone_ids = term |> Map.get(:zones, []) |> Enum.map(& &1[:id]) |> MapSet.new()
+
+    term
+    |> Map.get(:derived, [])
+    |> Enum.flat_map(fn d ->
+      cond do
+        not is_map(d) ->
+          [{:bad_derived, d}]
+
+        not is_atom(Map.get(d, :id)) ->
+          [{:derived_missing_id, d}]
+
+        Map.get(d, :kind) not in [:geofence, :expr, :sun] ->
+          [{:derived_bad_kind, d[:id], Map.get(d, :kind)}]
+
+        not is_list(Map.get(d, :out)) ->
+          [{:derived_missing_out, d[:id]}]
+
+        d.kind == :expr ->
+          case Merlin.Expr.compile(Map.get(d, :compute, "")) do
+            {:ok, expr} -> self_reference_errors(d, expr, zone_ids)
+            {:error, reason} -> [{:derived_bad_expression, d.id, reason}]
+          end
+
+        true ->
+          []
+      end
+    end)
+  end
+
+  # A derived fact that reads itself is a cycle. It would terminate here only
+  # because Derive.Expr refuses to react to its own output -- which is a
+  # guard, not a licence. Catch it at boot instead.
+  defp self_reference_errors(d, expr, _zone_ids) do
+    if d.out in Merlin.Expr.deps(expr) do
+      [{:derived_self_reference, d.id, Merlin.Path.to_string(d.out)}]
+    else
+      []
+    end
+  end
+
   defp compile_rules(term) do
     {ok, errors} =
       term
@@ -210,6 +284,9 @@ defmodule Merlin.Config.File do
       dry_run: Map.get(term, :dry_run, false),
       groups: term |> Map.get(:groups, []) |> Map.new(&{&1.id, &1}),
       sources: Map.get(term, :sources, []),
+      zones: Merlin.Zones.compile(Map.get(term, :zones, [])),
+      colocation_distance: Map.get(term, :colocation_distance, {0.25, :mi}),
+      derived: Map.get(term, :derived, []),
       rules: rules
     }
   end
@@ -223,6 +300,15 @@ defmodule Merlin.Config.File do
 
   defp describe({:unknown_group, rule_id, group, known}),
     do: "rule #{rule_id} commands unknown group #{inspect(group)} (known: #{inspect(known)})"
+
+  defp describe({:derived_self_reference, id, path}),
+    do: "derived fact #{id} reads its own output #{path} -- that is a cycle"
+
+  defp describe({:derived_bad_expression, id, reason}),
+    do: "derived fact #{id}: expression rejected: #{inspect(reason)}"
+
+  defp describe({:zone_hysteresis_below_one, id}),
+    do: "zone #{id}: hysteresis below 1.0 would make leaving easier than arriving"
 
   defp describe({:bad_topic_filter, id, filter, reason}),
     do: "source #{id}: bad topic filter #{inspect(filter)}: #{reason}"

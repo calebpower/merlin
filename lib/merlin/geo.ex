@@ -77,6 +77,25 @@ defmodule Merlin.Geo do
     distance(a, b) <= radius_m
   end
 
+  @doc """
+  Resolve a `{magnitude, unit}` pair to metres.
+
+      iex> Merlin.Geo.to_meters({400, :ft})
+      121.92
+
+  This is what lets a zone declare its own size in the units a person thinks
+  in. The Python had one global 0.25-mile threshold serving as every geofence
+  radius AND the phone-to-vehicle co-location distance -- two unrelated
+  quantities sharing one constant, so a house and a car park were necessarily
+  the same size.
+  """
+  @spec to_meters({number(), atom()} | number()) :: float()
+  def to_meters({n, :m}), do: m(n)
+  def to_meters({n, :ft}), do: ft(n)
+  def to_meters({n, :mi}), do: mi(n)
+  def to_meters({n, :km}), do: km(n)
+  def to_meters(n) when is_number(n), do: m(n)
+
   @doc "The mean Earth radius used, in metres. Exposed so tests can derive expectations."
   @spec earth_radius_m() :: float()
   def earth_radius_m, do: @earth_radius_m
