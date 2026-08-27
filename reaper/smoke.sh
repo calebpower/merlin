@@ -96,6 +96,38 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# ---------------------------------------------------------------------------
+# Preflight, run as the deployment actually runs it: the shipped binary, before
+# the daemon starts. It is the first acceptance check of the cutover, so a
+# smoke run that never invokes it is testing a different procedure from the one
+# that will be followed.
+# ---------------------------------------------------------------------------
+say "running merlin-preflight"
+pf_out="$REAPER_OUT/smoke-preflight.txt"
+
+if "$REL/bin/merlin-preflight" > "$pf_out" 2>&1; then
+    say "preflight exited 0"
+else
+    say "--- preflight output ---"; cat "$pf_out"
+    die "merlin-preflight failed before the daemon was even started"
+fi
+
+# It must have actually checked things. An exit status of 0 from a preflight
+# that examined nothing is precisely the failure it exists to prevent, and it
+# is what six stub checks produced until the deployment survey found them.
+if grep -q "pending" "$pf_out"; then
+    cat "$pf_out"
+    die "preflight still reports checks as pending -- it is passing on unknowns"
+fi
+
+for want in config rules secrets database broker listeners crypto; do
+    grep -qE "^ok +$want" "$pf_out" || {
+        cat "$pf_out"
+        die "preflight did not report a passing '$want' check"
+    }
+done
+say "preflight checked config, rules, secrets, database, broker, listeners and crypto"
+
 say "starting the release"
 "$REL/bin/merlin" daemon || die "release failed to start"
 

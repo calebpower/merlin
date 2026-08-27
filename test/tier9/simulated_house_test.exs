@@ -17,7 +17,10 @@ defmodule Merlin.SimulatedHouseTest do
 
   ## Determinism
 
-  The seed is printed on every run and can be pinned with `MERLIN_SIM_SEED`.
+  The seed is printed on every run. Pin it with `MERLIN_SIM_SEED` when running
+  `mix test` directly, or by writing it to `reaper/sim-seed` for a reaper run --
+  reaper does not forward environment variables into the guest, so the variable
+  alone would silently do nothing.
   A failing run reports the seed and the shrunk trace, so a defect found at
   step 173 of a 200-step run is handed back as the four steps that matter.
 
@@ -518,7 +521,10 @@ defmodule Merlin.SimulatedHouseTest do
         #{if complete?, do: "Shrunk trace", else: "PARTIALLY shrunk trace (budget exhausted -- this is not minimal)"} (#{length(shrunk)} of #{length(actions)} actions):
         #{Enum.map_join(shrunk, "\n", &"  #{inspect(&1)}")}
 
-        Replay with: MERLIN_SIM_SEED=#{seed} mix test --only tier9
+        Replay in a reaper session with:
+            echo #{seed} > reaper/sim-seed && reaper test
+        or directly:
+            MERLIN_SIM_SEED=#{seed} mix test --only tier9
         """)
       end
 

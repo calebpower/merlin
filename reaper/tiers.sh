@@ -106,8 +106,20 @@ tier 5 "daemon vs fakes" mix test --only tier5 --warnings-as-errors
 tier 6 "full stack (smoke)" sh reaper/smoke.sh
 tier 7 "seeded fuzzing" mix test --only tier7 --warnings-as-errors
 tier 8 "concurrency" mix test --only tier8 --warnings-as-errors
-# The seed is printed by the tier itself and captured in its log, so a failure
-# replays. MERLIN_SIM_SEED pins it.
+# reaper does not forward arbitrary environment variables into the guest, so
+# MERLIN_SIM_SEED set on the workstation would silently do nothing and the
+# "replay with" line in a tier 9 failure would be a lie. The seed is pinned
+# through a FILE instead, which syncs with the tree like everything else:
+#
+#     echo 3460 > reaper/sim-seed && reaper test
+#
+# Absent, the tier picks its own and prints it.
+if [ -f reaper/sim-seed ]; then
+    MERLIN_SIM_SEED=$(tr -dc '0-9' < reaper/sim-seed)
+    export MERLIN_SIM_SEED
+    say "tier 9 seed pinned to $MERLIN_SIM_SEED by reaper/sim-seed"
+fi
+
 tier 9 "simulated house" mix test --only tier9 --warnings-as-errors
 
 skip 10 "live browser audit" "deferred to M9"
