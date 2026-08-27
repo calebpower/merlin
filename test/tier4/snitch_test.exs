@@ -267,4 +267,75 @@ defmodule Merlin.HTTP.SnitchTest do
       end
     end
   end
+
+  describe "the operator is told why a request was rejected" do
+    # The always-200 rule is about what the CLIENT learns. Collapsing every
+    # failure into a silent :ok left the operator with a 200 and an empty log
+    # for a wrong key, a missing field and malformed JSON alike -- which is
+    # exactly the position a real deployment sat in for an afternoon.
+    #
+    # The reason is logged. The key never is.
+    import ExUnit.CaptureLog
+
+    # The test environment filters at :warning. These messages are :info --
+    # correctly, since a rejected request is information rather than a fault,
+    # and production runs at :info so they will appear there. Raising the
+    # level here is the right way round: the code should not be logged louder
+    # than it deserves to satisfy a test.
+    setup do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+      :ok
+    end
+
+    defp post_body(body) do
+      capture_log(fn ->
+        conn(:post, "/snitch", body) |> put_req_header("content-type", "application/json")
+        |> Merlin.HTTP.PublicRouter.call([])
+        Process.sleep(20)
+      end)
+    end
+
+    test "malformed JSON says so" do
+      assert post_body("{not json") =~ "not valid JSON"
+    end
+
+    test "a missing challenge names the keys that were present" do
+      log = post_body(~s({"status":{"a":1}}))
+      assert log =~ "no `challenge` field"
+      assert log =~ "status"
+    end
+
+    test "a missing status says so" do
+      assert post_body(~s({"challenge":"abcdefghijkl"})) =~ "no `status` field"
+    end
+
+    test "a null status is distinguished from a missing one" do
+      assert post_body(~s({"challenge":"abcdefghijkl","status":null})) =~ "is null"
+    end
+
+    test "a non-string challenge names its type" do
+      assert post_body(~s({"challenge":123,"status":{"a":1}})) =~ "not a string"
+    end
+
+    test "an unrecognised key is reported by PREFIX, never in full" do
+      key = "abcdefghijklmnopqrstuvwxyz012345"
+      log = post_body(~s({"challenge":"#{key}","status":{"a":1}}))
+
+      assert log =~ "not recognised"
+      assert log =~ "abcdefgh"
+
+      refute log =~ key,
+             "the full key was written to the log -- api.py:31 all over again"
+
+      refute log =~ "ijklmnop",
+             "more than the identifying prefix reached the log"
+    end
+
+    test "the reason mentions where to look" do
+      log = post_body(~s({"challenge":"abcdefghijklmnop","status":{"a":1}}))
+      assert log =~ "merlin-key list"
+    end
+  end
 end
