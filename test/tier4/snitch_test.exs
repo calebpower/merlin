@@ -400,6 +400,25 @@ defmodule Merlin.HTTP.SnitchTest do
     # An empty header must not count as a credential, or it silently bypasses
     # the envelope path and every such request is dropped with a confusing
     # reason.
+    # Without this the operator cannot tell a request carrying a credential
+    # under an unread name from one carrying none at all.
+    test "a rejection names the headers that were present, never their values" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        capture_log(fn ->
+          post_with(~s({"gps_latitude":1.0}), [{"x-wrong-name", "super-secret-value-here"}])
+        end)
+
+      assert log =~ "headers present:"
+      assert log =~ "x-wrong-name"
+
+      refute log =~ "super-secret-value-here",
+             "a header VALUE reached the log -- names only"
+    end
+
     test "an empty x-api-key falls through to the envelope" do
       previous = Logger.level()
       Logger.configure(level: :info)
