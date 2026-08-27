@@ -377,12 +377,21 @@
       id: :vehicle_away_while_home,
       kind: :expr,
       out: [:vehicle, :car, :away_while_home?],
-      # The :unknown exclusion matters here too: without it a tracker outage
-      # while you are sitting at home reads as "the car is not home" and
-      # alarms.
-      compute:
-        "person.caleb.zone == :home and defined?(vehicle.car.zone) and " <>
-          "vehicle.car.zone != :home",
+      # No `defined?` guard, deliberately, and the mutation check is what
+      # settled it.
+      #
+      # `defined?(zone) and zone != :home` and plain `zone != :home` behave
+      # identically for a RULE, because both are non-truthy when the zone is
+      # unknown and a guard fires only on literal true. But this is a derived
+      # FACT, and the values differ: with the guard it reads `false`, without
+      # it `:unknown`.
+      #
+      # `false` asserts "we checked, the car is not away while you are home".
+      # `:unknown` says "the tracker is dark and we cannot tell". The second is
+      # true and the first is not, and the whole point of the tri-state is to
+      # stop the daemon claiming knowledge it does not have. Propagation
+      # already prevents the alert from firing.
+      compute: "person.caleb.zone == :home and vehicle.car.zone != :home",
       hold: {:true_for, {2, :minute}}
     }
   ],
