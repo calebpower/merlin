@@ -419,6 +419,57 @@ defmodule Merlin.HTTP.SnitchTest do
              "a header VALUE reached the log -- names only"
     end
 
+    test "a key in the query string works, with the body verbatim", %{key: key} do
+      body = ~s({"gps_latitude":51.4779,"gps_longitude":-0.0015})
+
+      assert %{status: 200} =
+               conn(:post, "/snitch?key=" <> URI.encode_www_form(key), body)
+               |> put_req_header("content-type", "application/json")
+               |> @router.call(@opts)
+
+      assert_receive {:injected, "http/mobile/ariia/state", ^body, _}
+    end
+
+    test "`challenge` and `api_key` work as query names too", %{key: key} do
+      for name <- ["challenge", "api_key"] do
+        assert %{status: 200} =
+                 conn(:post, "/snitch?#{name}=" <> URI.encode_www_form(key), ~s({"a":1}))
+                 |> put_req_header("content-type", "application/json")
+                 |> @router.call(@opts)
+
+        assert_receive {:injected, "http/mobile/ariia/state", _, _}
+      end
+    end
+
+    test "a header key wins over a query key", %{key: key} do
+      # If both are present the header is the one that should count: it is the
+      # form less likely to be logged by something else.
+      assert %{status: 200} =
+               conn(:post, "/snitch?key=rubbish", ~s({"a":1}))
+               |> put_req_header("content-type", "application/json")
+               |> put_req_header("x-api-key", key)
+               |> @router.call(@opts)
+
+      assert_receive {:injected, "http/mobile/ariia/state", _, _}
+    end
+
+    test "a rejection names query parameters, never their values" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        capture_log(fn ->
+          conn(:post, "/snitch?wrongname=super-secret-value", ~s({"gps_latitude":1.0}))
+          |> put_req_header("content-type", "application/json")
+          |> @router.call(@opts)
+        end)
+
+      assert log =~ "query parameters:"
+      assert log =~ "wrongname"
+      refute log =~ "super-secret-value", "a query VALUE reached the log"
+    end
+
     test "an empty x-api-key falls through to the envelope" do
       previous = Logger.level()
       Logger.configure(level: :info)
