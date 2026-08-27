@@ -105,18 +105,41 @@ defmodule Merlin.HTTP.PublicRouter do
   # Never returns anything the caller can distinguish; its only job is the
   # side effect. Wrapped, because a raise here would still owe the client a
   # response and must not become a 500 that leaks which branch it reached.
-  defp handle_snitch(body) when not is_binary(body), do: :ok
+  defp handle_snitch(body) when not is_binary(body) do
+    Logger.info("snitch rejected: body was #{inspect(body)}")
+    :ok
+  end
 
+  # The always-200 rule is about what the CLIENT learns, not what the operator
+  # does. Collapsing every failure into a silent `:ok` meant a phone posting a
+  # wrong key, a missing field or malformed JSON all produced an empty log and
+  # a 200, with no way to tell them apart -- which is exactly the position this
+  # deployment was in for an afternoon.
+  #
+  # The reason is logged; the key never is. A key's first eight characters are
+  # stored precisely so a key can be identified without its secret, and eight
+  # characters of a 192-bit key identify nothing on their own.
   defp handle_snitch(body) do
-    with {:ok, %{"challenge" => challenge, "status" => status}} when is_binary(challenge) <-
-           Jason.decode(body),
-         false <- is_nil(status),
-         {:ok, topic, id} <- lookup(challenge) do
-      payload = if is_binary(status), do: status, else: Jason.encode!(status)
-      Ingress.inject(topic, payload, source: {:http, id})
-      KeyStore.with_db(fn db -> KeyStore.touch(db, id) end)
-    else
-      _ -> :ok
+    case decode_snitch(body) do
+      {:ok, challenge, status} ->
+        case lookup(challenge) do
+          {:ok, topic, id} ->
+            payload = if is_binary(status), do: status, else: Jason.encode!(status)
+            Ingress.inject(topic, payload, source: {:http, id})
+            KeyStore.with_db(fn db -> KeyStore.touch(db, id) end)
+
+          :error ->
+            Logger.info(
+              "snitch rejected: key #{key_prefix(challenge)} is not recognised, or is " <>
+                "revoked or expired. `merlin-key list` shows what is accepted."
+            )
+
+            :ok
+        end
+
+      {:error, reason} ->
+        Logger.info("snitch rejected: #{reason}")
+        :ok
     end
   rescue
     e ->
@@ -124,6 +147,44 @@ defmodule Merlin.HTTP.PublicRouter do
       Logger.warning("snitch handler raised: #{Exception.message(e)}")
       :ok
   end
+
+  # Every way a body can fail to be a position report, named.
+  defp decode_snitch(body) do
+    case Jason.decode(body) do
+      {:ok, %{"challenge" => c, "status" => s}} when is_binary(c) and not is_nil(s) ->
+        {:ok, c, s}
+
+      {:ok, %{"challenge" => c, "status" => nil}} when is_binary(c) ->
+        {:error, "the `status` field is null"}
+
+      {:ok, %{"challenge" => c}} when is_binary(c) ->
+        {:error, "no `status` field"}
+
+      {:ok, %{"challenge" => c}} ->
+        {:error, "`challenge` is a #{type_name(c)}, not a string"}
+
+      {:ok, map} when is_map(map) ->
+        {:error, "no `challenge` field; the body has #{inspect(Map.keys(map))}"}
+
+      {:ok, other} ->
+        {:error, "the body is a #{type_name(other)}, not an object"}
+
+      {:error, _} ->
+        {:error, "the body is not valid JSON (#{byte_size(body)} bytes)"}
+    end
+  end
+
+  defp key_prefix(challenge) when is_binary(challenge) do
+    binary_part(challenge, 0, min(8, byte_size(challenge))) <> "..."
+  end
+
+  defp type_name(v) when is_binary(v), do: "string"
+  defp type_name(v) when is_number(v), do: "number"
+  defp type_name(v) when is_list(v), do: "array"
+  defp type_name(v) when is_map(v), do: "object"
+  defp type_name(v) when is_boolean(v), do: "boolean"
+  defp type_name(nil), do: "null"
+  defp type_name(_), do: "value"
 
   defp lookup(challenge) do
     KeyStore.with_db(fn conn -> KeyStore.resolve(conn, challenge) end)
