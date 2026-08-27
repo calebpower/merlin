@@ -36,7 +36,13 @@ defmodule Merlin.Application do
         Merlin.Bus,
 
         # The sole process permitted to write facts.
-        Merlin.World.Writer
+        Merlin.World.Writer,
+
+        # Registries for the named processes. Started unconditionally: tests
+        # start individual machines and derived facts directly, without the
+        # supervisors that would otherwise own these.
+        {Registry, keys: :unique, name: Merlin.Machine.Registry},
+        {Registry, keys: :unique, name: Merlin.Derive.Registry}
       ] ++ mqtt_children() ++ http_children()
 
     opts = [
@@ -59,7 +65,9 @@ defmodule Merlin.Application do
         # Derived facts sit between the adapters and the rules: they consume
         # raw observations and produce the semantics rules are written against.
         Merlin.Derive.Supervisor,
-        Merlin.Rules.Engine
+        Merlin.Rules.Engine,
+        # Stateful rules, one :gen_statem each.
+        Merlin.Machine.Supervisor
       ],
       else: []
   end

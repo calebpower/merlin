@@ -227,15 +227,34 @@ defmodule Merlin.Config.File do
           [{:derived_missing_out, d[:id]}]
 
         d.kind == :expr ->
-          case Merlin.Expr.compile(Map.get(d, :compute, "")) do
-            {:ok, expr} -> self_reference_errors(d, expr, zone_ids)
-            {:error, reason} -> [{:derived_bad_expression, d.id, reason}]
-          end
+          hold_errors(d) ++
+            case Merlin.Expr.compile(Map.get(d, :compute, "")) do
+              {:ok, expr} -> self_reference_errors(d, expr, zone_ids)
+              {:error, reason} -> [{:derived_bad_expression, d.id, reason}]
+            end
 
         true ->
           []
       end
     end)
+  end
+
+  # A bad hold spec must fail at boot, not raise inside the process's init/1
+  # where it would present as a supervisor restart loop with no explanation.
+  defp hold_errors(d) do
+    case Map.get(d, :hold) do
+      nil ->
+        []
+
+      {:true_for, duration} ->
+        case Merlin.Machine.to_ms(duration) do
+          {:ok, _} -> []
+          {:error, reason} -> [{:derived_bad_hold, d.id, reason}]
+        end
+
+      other ->
+        [{:derived_bad_hold, d.id, other}]
+    end
   end
 
   # A derived fact that reads itself is a cycle. It would terminate here only
@@ -249,11 +268,17 @@ defmodule Merlin.Config.File do
     end
   end
 
+  # A config entry with a :machine key is a stateful rule; everything else is
+  # stateless. One list, so the ordering in the file is the ordering a reader
+  # sees, rather than two lists that must be mentally interleaved.
   defp compile_rules(term) do
     {ok, errors} =
       term
       |> Map.get(:rules, [])
-      |> Enum.map(&Rule.compile/1)
+      |> Enum.map(fn
+        %{machine: _} = m -> Merlin.Machine.compile(m)
+        r -> Rule.compile(r)
+      end)
       |> Enum.split_with(&match?({:ok, _}, &1))
 
     case errors do
@@ -266,7 +291,9 @@ defmodule Merlin.Config.File do
   # typo'd group name from a silent no-op into a refusal to start.
   defp rule_reference_errors(rules, group_ids) do
     Enum.flat_map(rules, fn rule ->
-      Enum.flat_map(rule.actions, fn
+      rule
+      |> all_actions()
+      |> Enum.flat_map(fn
         {:set_group, group, _} ->
           if MapSet.member?(group_ids, group),
             do: [],
@@ -276,6 +303,19 @@ defmodule Merlin.Config.File do
           []
       end)
     end)
+  end
+
+  # A stateless rule keeps its actions at the top level; a machine keeps them
+  # inside each clause of each state. Both must be checked, or a typo'd group
+  # name inside a machine would be a silent no-op at 3am instead of a boot
+  # failure -- which is the whole reason this check exists.
+  defp all_actions(%Merlin.Rule{actions: actions}), do: actions
+
+  defp all_actions(%Merlin.Machine{states: states}) do
+    for {_state, clauses} <- states,
+        %Merlin.Machine.Clause{actions: actions} <- clauses,
+        action <- actions,
+        do: action
   end
 
   defp build(term, rules) do
@@ -300,6 +340,9 @@ defmodule Merlin.Config.File do
 
   defp describe({:unknown_group, rule_id, group, known}),
     do: "rule #{rule_id} commands unknown group #{inspect(group)} (known: #{inspect(known)})"
+
+  defp describe({:derived_bad_hold, id, reason}),
+    do: "derived fact #{id}: bad hold: #{inspect(reason)} (expected {:true_for, {n, unit}})"
 
   defp describe({:derived_self_reference, id, path}),
     do: "derived fact #{id} reads its own output #{path} -- that is a cycle"

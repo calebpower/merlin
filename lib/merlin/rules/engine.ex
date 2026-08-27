@@ -7,19 +7,21 @@ defmodule Merlin.Rules.Engine do
   triggers it fires are selected, each guard is evaluated, and the surviving
   actions are resolved and performed.
 
-  ## One process, for now
+  ## Stateless only
 
-  Every rule is evaluated in this process. The full design gives each rule its
-  own `:gen_statem` -- for crash isolation, per-rule state, timeouts and
-  introspection -- and that arrives at M5 when the first stateful rule needs
-  it. Doing it now would be building the shape before anything has pushed back
-  on it, and stateless rules genuinely do not need it.
+  Stateful rules are `Merlin.Machine.Server` processes under
+  `Merlin.Machine.Supervisor`, one `:gen_statem` each. This engine evaluates
+  the rest, all in one process.
 
-  What that costs today, stated plainly: a rule that raises takes the engine
-  down and every rule restarts with it. Guard and action evaluation is
-  therefore wrapped, and a raising rule is logged and skipped rather than
-  propagated -- the same reasoning as `Merlin.MQTT.Connection`, since rule data
-  is authored input and a bad expression must not cost the house its lights.
+  That asymmetry is deliberate rather than unfinished. Machines hold state,
+  arm timers and benefit from crash isolation; a stateless trigger-guard-action
+  rule has nothing to isolate and would cost a process each for no gain.
+
+  What one process costs, stated plainly: a rule that raises would take the
+  engine down and every stateless rule with it. Guard and action evaluation is
+  therefore wrapped, and a raising rule is logged and skipped -- the same
+  reasoning as `Merlin.MQTT.Connection`, since rule data is authored input and
+  a bad expression must not cost the house its lights.
 
   ## Causality
 
@@ -45,8 +47,14 @@ defmodule Merlin.Rules.Engine do
 
   @impl true
   def init(opts) do
-    rules = Keyword.get(opts, :rules, Merlin.Config.rules())
-    enabled = Enum.filter(rules, & &1.enabled)
+    # Stateless rules only. Machines are their own :gen_statem processes under
+    # Merlin.Machine.Supervisor -- crash isolation per machine is most of the
+    # point of giving them processes at all.
+    enabled =
+      opts
+      |> Keyword.get(:rules, Merlin.Config.rules())
+      |> Enum.filter(&match?(%Merlin.Rule{}, &1))
+      |> Enum.filter(& &1.enabled)
 
     for rule <- enabled do
       Enum.each(rule.watches, &Bus.subscribe/1)

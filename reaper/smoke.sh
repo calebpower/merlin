@@ -370,6 +370,79 @@ say "key absent from the log"
 say "revoked it"
 
 # ---------------------------------------------------------------------------
+# The M5 demonstrable: the printer power cycle, and bug 7.
+#
+# office_aircond.py restored the A/C on the printer REQUEST value, so a REBOOT
+# un-masked immediately and the A/C came back on at t=0 -- during the ten
+# seconds the printer was deliberately powered down. Here the load shed
+# watches printer.kobra_neo.busy?, which stays true through the dwell, so the
+# A/C cannot return until the cycle has actually finished.
+#
+# This takes ~13s because the dwell is genuinely ten seconds in production
+# config. Tier 1 exercises the same state timeout in 25ms by declaring
+# milliseconds; this one proves the shipped durations.
+# ---------------------------------------------------------------------------
+say "checking the printer power cycle and the A/C load shed (bug 7)"
+
+plug_log="$REAPER_OUT/smoke-plugs.txt"
+: > "$plug_log"
+
+# Tell the daemon the A/C is on, so there is a desire worth restoring.
+/usr/local/bin/mosquitto_pub -h 127.0.0.1 -r \
+    -t 'home/office/plug/climate' -m '{"state":"ON"}' 2>/dev/null
+sleep 0.5
+
+# Watch both plug set-topics with timestamps, for the whole cycle.
+/usr/local/bin/mosquitto_sub -h 127.0.0.1 -v -W 14 \
+    -t 'home/office/plug/+/set' > "$plug_log" 2>/dev/null &
+plug_sub=$!
+sleep 0.3
+
+/usr/local/bin/mosquitto_pub -h 127.0.0.1 \
+    -t 'bubbles/anycubic_kobra_neo/power' -m 'REBOOT' 2>/dev/null
+
+# Echo the plug's own state back, the way a real smart plug does after being
+# commanded. THIS IS WHAT MAKES THE MASK MATTER: while shedding, that OFF
+# report is our own command coming back, and if the machine records it as the
+# desired state then the restore has nothing to restore to and the A/C never
+# returns. Without this echo the mask clause was untested -- a mutation that
+# deleted it from the shipped config survived the whole battery.
+( sleep 2
+  /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r \
+      -t 'home/office/plug/climate' -m '{"state":"OFF"}' 2>/dev/null ) &
+
+wait "$plug_sub" 2>/dev/null || true
+
+say "plug traffic during the cycle:"
+cat "$plug_log" | sed 's/^/      /'
+
+# The printer must have been cut and restored.
+grep -q '3d_printer/set {"state":"OFF"}' "$plug_log" \
+    || die "the printer was never powered down"
+grep -q '3d_printer/set {"state":"ON"}' "$plug_log" \
+    || die "the printer was never powered back up after the dwell"
+say "printer: OFF then ON across the dwell"
+
+# The A/C must have been shed.
+grep -q 'climate/set {"state":"OFF"}' "$plug_log" \
+    || die "the A/C was never shed for the printer"
+say "A/C shed while the printer was busy"
+
+# BUG 7: the A/C restore must come AFTER the printer came back, not before.
+ac_on_line=$(grep -n 'climate/set {"state":"ON"}' "$plug_log" | head -1 | cut -d: -f1)
+printer_on_line=$(grep -n '3d_printer/set {"state":"ON"}' "$plug_log" | head -1 | cut -d: -f1)
+
+if [ -z "$ac_on_line" ]; then
+    die "the A/C was never restored after the print cycle"
+fi
+
+if [ -z "$printer_on_line" ] || [ "$ac_on_line" -lt "$printer_on_line" ]; then
+    die "BUG 7: the A/C came back at line $ac_on_line, before the printer at line ${printer_on_line:-never} -- it was restored during the power cycle"
+fi
+
+say "A/C restored only AFTER the printer returned (bug 7 is fixed)"
+
+# ---------------------------------------------------------------------------
 # dry_run must actually block effects.
 #
 # The whole cutover plan rests on being able to run against the live broker

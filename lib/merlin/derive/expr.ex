@@ -26,12 +26,22 @@ defmodule Merlin.Derive.Expr do
   keep in step with the expression. Change the expression and the
   subscriptions follow.
 
-  ## What it will not do yet
+  ## hold: sustained-for windows
 
-  No `hold:` / sustained-for window. "True for two minutes before it counts"
-  needs a timer, and timers arrive with the `:gen_statem` executors at M5.
-  Until then a derived fact reflects the world as it is this instant, which is
-  correct but twitchier than the vehicle rules ultimately want.
+      hold: {:true_for, {2, :minute}}
+
+  The fact only becomes true once the expression has been continuously true
+  for that long. A single bad GPS fix cannot fire an alarm.
+
+  This matters specifically for the vehicle. `alerts.py` fired
+  ":warning: Vehicle has gone AWOL" on the first false-edge of a flag derived
+  from one GPS reading -- so one bounced fix at the edge of a zone was an alert
+  at 3am. A hold turns a momentary blip into nothing at all, because the timer
+  is cancelled the instant the condition stops holding.
+
+  Note the asymmetry: the window delays becoming **true**, and going false is
+  immediate. An alarm should be slow to fire and quick to clear, not the
+  reverse.
   """
 
   use GenServer
@@ -39,7 +49,7 @@ defmodule Merlin.Derive.Expr do
 
   alias Merlin.{Expr, Fact, Groups, World}
 
-  defstruct [:id, :out_path, :expr]
+  defstruct [:id, :out_path, :expr, :hold_ms, :pending_ref]
 
   @doc false
   def start_link(spec), do: GenServer.start_link(__MODULE__, spec, name: via(spec.id))
@@ -49,12 +59,18 @@ defmodule Merlin.Derive.Expr do
   @impl true
   def init(spec) do
     expr = Expr.compile!(spec.compute)
-    state = %__MODULE__{id: spec.id, out_path: spec.out, expr: expr}
+
+    hold_ms =
+      case spec[:hold] do
+        nil -> nil
+        {:true_for, duration} -> elem(Merlin.Machine.to_ms(duration), 1)
+      end
+
+    state = %__MODULE__{id: spec.id, out_path: spec.out, expr: expr, hold_ms: hold_ms}
 
     for path <- Expr.deps(expr), do: Merlin.Bus.subscribe(path)
 
-    recompute(state)
-    {:ok, state}
+    {:ok, recompute(state)}
   end
 
   @impl true
@@ -63,17 +79,53 @@ defmodule Merlin.Derive.Expr do
     # a config error caught at boot, but this is the cheap structural guard --
     # user_location.py re-entered itself on every write and terminated only
     # because the dedup happened to converge.
-    unless path == state.out_path, do: recompute(state)
-    {:noreply, state}
+    if path == state.out_path, do: {:noreply, state}, else: {:noreply, recompute(state)}
+  end
+
+  # The hold elapsed. Re-evaluate rather than trusting the value that armed
+  # the timer: the point of a sustained-for window is that the condition is
+  # still true NOW, not that it was true when the clock started.
+  def handle_info({:hold_elapsed, ref}, %{pending_ref: ref} = state) do
+    env = %{read: &read/1, group: Groups.resolver()}
+
+    if Expr.eval(state.expr, env) == true do
+      World.put(state.out_path, true, source: {:derive, state.id})
+    end
+
+    {:noreply, %{state | pending_ref: nil}}
   end
 
   def handle_info(_other, state), do: {:noreply, state}
 
-  defp recompute(state) do
-    env = %{read: &read/1, group: Groups.resolver()}
-    value = Expr.eval(state.expr, env)
+  defp recompute(%{hold_ms: nil} = state) do
+    World.put(state.out_path, evaluate(state), source: {:derive, state.id})
+    state
+  end
 
-    World.put(state.out_path, value, source: {:derive, state.id})
+  defp recompute(state) do
+    case evaluate(state) do
+      true ->
+        # Arm the window if one is not already running. Re-arming on every
+        # intermediate change would mean the window never elapses while the
+        # inputs are noisy -- which is the opposite of what it is for.
+        if state.pending_ref do
+          state
+        else
+          ref = make_ref()
+          Process.send_after(self(), {:hold_elapsed, ref}, state.hold_ms)
+          %{state | pending_ref: ref}
+        end
+
+      other ->
+        # Falling is immediate, and cancels any armed window. An alarm should
+        # be slow to fire and quick to clear.
+        World.put(state.out_path, other, source: {:derive, state.id})
+        %{state | pending_ref: nil}
+    end
+  end
+
+  defp evaluate(state) do
+    Expr.eval(state.expr, %{read: &read/1, group: Groups.resolver()})
   end
 
   defp read(path) do

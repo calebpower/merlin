@@ -61,6 +61,16 @@ defmodule Merlin.Effects do
   """
   @spec perform([effect()], keyword()) :: [effect()]
   def perform(effects, opts \\ []) do
+    # A test observer, if one is registered. Effects are sent in the order the
+    # clause produced them, which is what lets a test assert that the printer
+    # emitted OFF *then* ON rather than merely that both happened -- ordering
+    # is the entire content of a sequence, and a set-based assertion would
+    # pass for a machine that did them backwards.
+    case Application.get_env(:merlin, :effects_observer) do
+      pid when is_pid(pid) -> send(pid, {:effects, Keyword.get(opts, :rule), effects})
+      _ -> :ok
+    end
+
     dry? = Keyword.get(opts, :dry_run, Merlin.Config.dry_run?())
     rule = Keyword.get(opts, :rule)
     # Causal chain, from the change that triggered the rule. Carried through so

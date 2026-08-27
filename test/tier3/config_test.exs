@@ -20,6 +20,21 @@ defmodule Merlin.ConfigSourceTest do
 
   alias Merlin.Config
 
+  # A stateless rule keeps its actions at the top level; a machine keeps them
+  # inside each clause of each state. Tests that assert over "every rule" have
+  # to know that, or they quietly stop covering half the rules.
+  defp actions_of(%Merlin.Rule{actions: actions}), do: actions
+
+  defp actions_of(%Merlin.Machine{states: states}) do
+    for {_state, clauses} <- states,
+        %Merlin.Machine.Clause{actions: actions} <- clauses,
+        action <- actions,
+        do: action
+  end
+
+  defp watches_any?(%Merlin.Rule{} = r), do: r.watches != [] or r.watch_events != []
+  defp watches_any?(%Merlin.Machine{} = m), do: m.watches != [] or m.watch_events != []
+
   # The real file, not a fixture.
   @config_path Path.expand("../../priv/merlin.exs", __DIR__)
 
@@ -45,7 +60,7 @@ defmodule Merlin.ConfigSourceTest do
     test "every rule commands a group that exists", %{config: config} do
       group_ids = Map.keys(config.groups)
 
-      for rule <- config.rules, {:set_group, group, _} <- rule.actions do
+      for rule <- config.rules, {:set_group, group, _} <- actions_of(rule) do
         assert group in group_ids,
                "rule #{rule.id} commands unknown group #{inspect(group)}"
       end
@@ -94,6 +109,14 @@ defmodule Merlin.ConfigSourceTest do
       assert length(Enum.uniq(rule_ids)) == length(rule_ids), "duplicate rule id"
     end
 
+    test "both rule shapes are present in the shipped config", %{config: config} do
+      # If this ever fails, the assertions below have quietly stopped covering
+      # one of the two shapes -- which is how a whole class of rule ends up
+      # untested without anyone noticing.
+      assert Enum.any?(config.rules, &match?(%Merlin.Rule{}, &1)), "no stateless rules"
+      assert Enum.any?(config.rules, &match?(%Merlin.Machine{}, &1)), "no machines"
+    end
+
     test "every rule has a description", %{config: config} do
       # The description is the English sentence the rule claims to implement.
       # A rule nobody could describe is a rule nobody can review.
@@ -105,8 +128,7 @@ defmodule Merlin.ConfigSourceTest do
 
     test "every rule watches something", %{config: config} do
       for rule <- config.rules do
-        assert rule.watches != [] or rule.watch_events != [],
-               "rule #{rule.id} watches nothing and can never fire"
+        assert watches_any?(rule), "rule #{rule.id} watches nothing and can never fire"
       end
     end
 

@@ -109,6 +109,59 @@
       ]
     },
 
+    # --- 3D printer (klipper_monitor.py) -----------------------------------
+    # The Python conflated two different things on one state key: power
+    # COMMANDS (ON/OFF/REBOOT) and print LIFECYCLE (printing/complete). One was
+    # a mailbox, the other a state, and two hooks raced to reset the mailbox.
+    # They are an event and a fact here, and nothing resets anything.
+    %{
+      id: :printer_power_request,
+      topic: "bubbles/anycubic_kobra_neo/power",
+      decode: :raw,
+      events: [
+        %{
+          path: [:printer, :kobra_neo, :power_request],
+          codec: {:enum, %{"ON" => :on, "OFF" => :off, "REBOOT" => :reboot}}
+        }
+      ]
+    },
+    %{
+      id: :printer_job,
+      topic: "moonraker/status/print_stats",
+      decode: :json,
+      facts: [
+        %{
+          path: [:printer, :kobra_neo, :job],
+          # Moonraker reports state at either depth depending on the message;
+          # klipper_monitor.py handled both with an `or`.
+          from: [["state"], ["print_stats", "state"]],
+          codec:
+            {:enum,
+             %{
+               "printing" => :printing,
+               "complete" => :complete,
+               "cancelled" => :cancelled,
+               "error" => :error,
+               "standby" => :standby
+             }}
+        }
+      ]
+    },
+
+    # --- office A/C (office_aircond.py) ------------------------------------
+    %{
+      id: :office_ac,
+      topic: "home/office/plug/climate",
+      decode: :json,
+      facts: [
+        %{
+          path: [:climate, :office, :power],
+          from: [["state"]],
+          codec: {:enum, %{"ON" => :on, "OFF" => :off}}
+        }
+      ]
+    },
+
     # --- the phone, via POST /snitch (mobile_device.py) --------------------
     # Not a broker topic: an API key resolves to this string and the payload is
     # injected as though it had arrived on it. The source cannot tell.
@@ -197,6 +250,16 @@
     # before it counts" needs a timer, and timers arrive with the gen_statem
     # executors at M5. Until then these are twitchier than they should be,
     # which is why both alerting rules below log rather than notify.
+    # Bug 7. office_aircond.py restored the A/C on the REQUEST value, so a
+    # REBOOT un-masked immediately and the A/C came back at t=0 rather than
+    # after the ten-second cycle. Shedding on "busy" instead, where busy
+    # includes the dwell, makes the window correct by construction.
+    %{
+      id: :printer_busy,
+      kind: :expr,
+      out: [:printer, :kobra_neo, :busy?],
+      compute: "printer.kobra_neo.job == :printing or rule.printer_power.state != :idle"
+    },
     %{
       id: :vehicle_with_phone,
       kind: :expr,
@@ -207,13 +270,18 @@
       id: :vehicle_unaccounted,
       kind: :expr,
       out: [:vehicle, :car, :unaccounted?],
-      compute: "unknown?(vehicle.car.zone) and vehicle.car.with_phone? == false"
+      compute: "unknown?(vehicle.car.zone) and vehicle.car.with_phone? == false",
+      # Your decision at planning. alerts.py fired on the first false-edge of a
+      # flag derived from one GPS reading, so a single bounced fix at a zone
+      # edge was an alert. Two minutes of continuous truth, or nothing.
+      hold: {:true_for, {2, :minute}}
     },
     %{
       id: :vehicle_away_while_home,
       kind: :expr,
       out: [:vehicle, :car, :away_while_home?],
-      compute: "person.caleb.zone == :home and vehicle.car.zone != :home"
+      compute: "person.caleb.zone == :home and vehicle.car.zone != :home",
+      hold: {:true_for, {2, :minute}}
     }
   ],
 
@@ -295,6 +363,186 @@
       desc: "Log when I am home and the car is not.",
       on: [{:enters, [:vehicle, :car, :away_while_home?], true}],
       do: [{:log, :warning, "vehicle is away while I am home"}]
+    },
+
+    # --- the printer power sequence (3dprinter_kobra_neo.py) ---------------
+    # REBOOT is OFF, wait ten seconds, ON. In the Python that wait was
+    # `await asyncio.sleep(10)` inside the hook: it blocked that hook's task
+    # for ten seconds and nothing could cancel it. Here it is a state timeout,
+    # which cancels itself if anything moves the machine out of :dwell.
+    %{
+      id: :printer_power,
+      desc: "3D printer power. ON and OFF pass through; REBOOT power-cycles with a 10s dwell.",
+      machine: %{
+        initial: :idle,
+        states: %{
+          idle: [
+            %{
+              on: {:receives, [:printer, :kobra_neo, :power_request]},
+              when: "trigger.value == :on",
+              do: [{:publish, "home/office/plug/3d_printer/set", ~s({"state":"ON"})}]
+            },
+            %{
+              on: {:receives, [:printer, :kobra_neo, :power_request]},
+              when: "trigger.value == :off",
+              do: [{:publish, "home/office/plug/3d_printer/set", ~s({"state":"OFF"})}]
+            },
+            %{
+              on: {:receives, [:printer, :kobra_neo, :power_request]},
+              when: "trigger.value == :reboot",
+              do: [
+                {:publish, "home/office/plug/3d_printer/set", ~s({"state":"OFF"})},
+                {:log, :info, "printer reboot: power cut, 10s dwell"}
+              ],
+              goto: :dwell
+            }
+          ],
+          dwell: [
+            %{
+              on: {:after, {10, :second}},
+              do: [{:publish, "home/office/plug/3d_printer/set", ~s({"state":"ON"})}],
+              goto: :idle
+            },
+            # A request arriving mid-cycle is deferred, not dropped. One
+            # keyword instead of a hand-rolled pending queue.
+            %{on: {:receives, [:printer, :kobra_neo, :power_request]}, postpone: true}
+          ]
+        }
+      }
+    },
+
+    # --- the A/C load shed (office_aircond.py) -----------------------------
+    # The subtlest logic in the Python, and the reason machines exist here.
+    # While shedding, an OFF report from the plug is our own command echoing
+    # back and must NOT overwrite the remembered desire -- otherwise the
+    # restore has nothing to restore to.
+    #
+    # In the Python the mask was `self.printer_active`, an instance variable
+    # no rule could read, no dashboard could show and no restart preserved.
+    # Here it is the state name, published as rule.office_load_shed.state.
+    #
+    # Bug 7 is fixed by shedding on the printer being BUSY rather than on the
+    # request: printer.kobra_neo.busy? stays true through the reboot dwell, so
+    # the A/C no longer comes back on at the start of a power cycle.
+    %{
+      id: :office_load_shed,
+      desc: "The office A/C yields to the 3D printer, and my desired setting is restored after.",
+      machine: %{
+        initial: :idle,
+        data: %{desired: :off},
+        states: %{
+          idle: [
+            # While idle, what the plug reports IS what I want.
+            %{
+              on: {:changes, [:climate, :office, :power]},
+              set: %{desired: {:expr, "climate.office.power"}}
+            },
+            %{
+              on: {:enters, [:printer, :kobra_neo, :busy?], true},
+              set: %{desired: {:expr, "climate.office.power"}},
+              do: [
+                {:publish, "home/office/plug/climate/set", ~s({"state":"OFF"})},
+                {:log, :info, "shedding office A/C for the printer"}
+              ],
+              goto: :shedding
+            }
+          ],
+          shedding: [
+            # The mask: an OFF report while shedding is our own command coming
+            # back, and must not be recorded as the desired state.
+            #
+            # HONESTLY: this clause is currently redundant, and a mutation that
+            # deletes it survives the whole battery. Nothing else in :shedding
+            # matches a climate change with value :off -- the next clause is
+            # guarded on :on -- so the report already falls through to
+            # ignore-by-default and the desire is preserved either way.
+            #
+            # It is kept as defensive documentation, not as behaviour. The
+            # Python NEEDED an explicit mask because its fallthrough was
+            # `else: state.set(...)`, which would have recorded the echo; here
+            # the fallthrough is "do nothing". Keeping the clause means that if
+            # anyone later adds a general climate-change clause to this state,
+            # this one shadows it for the :off case and the mask survives the
+            # edit. Remove it only if you also convince yourself of that.
+            #
+            # The PROPERTY -- the desire survives the plug's echo -- is what
+            # tier 6 asserts, by echoing the plug state mid-cycle and requiring
+            # the restore to still happen.
+            %{on: {:changes, [:climate, :office, :power]}, when: "climate.office.power == :off"},
+
+            # An ON report while shedding is a deliberate human override.
+            # Honour it and stop shedding. The Python swallowed this.
+            %{
+              on: {:changes, [:climate, :office, :power]},
+              when: "climate.office.power == :on",
+              set: %{desired: :on},
+              do: [{:log, :info, "office A/C overridden by hand during a print; load shed abandoned"}],
+              goto: :overridden
+            },
+
+            %{
+              on: {:leaves, [:printer, :kobra_neo, :busy?], true},
+              when: "local.desired == :on",
+              do: [
+                {:publish, "home/office/plug/climate/set", ~s({"state":"ON"})},
+                {:log, :info, "printer finished; restoring office A/C"}
+              ],
+              goto: :idle
+            },
+            %{on: {:leaves, [:printer, :kobra_neo, :busy?], true}, goto: :idle},
+
+            # Never shed forever if the printer stops reporting altogether.
+            %{
+              on: {:after, {12, :hour}},
+              do: [{:log, :warning, "load-shed watchdog expired; leaving the A/C alone"}],
+              goto: :idle
+            }
+          ],
+          overridden: [
+            %{
+              on: {:changes, [:climate, :office, :power]},
+              set: %{desired: {:expr, "climate.office.power"}}
+            },
+            %{on: {:leaves, [:printer, :kobra_neo, :busy?], true}, goto: :idle}
+          ]
+        }
+      }
+    },
+
+    # --- the intruder latch (alerts.py) ------------------------------------
+    # One alert per absence, re-armed on return. In the Python this was
+    # `self.presence_alert_fired`, a boolean that vanished on restart -- so a
+    # daemon restart mid-absence would alert again for the same intrusion.
+    # A latch is a state, not a boolean.
+    #
+    # Pointed at :log, not a notifier. This path has NEVER executed: it was
+    # gated on `USR_LOC_HOME_FLAG is False`, which bug 2 made unreachable.
+    # Watch it for a fortnight before it is allowed to wake you.
+    %{
+      id: :intruder_latch,
+      desc: "If a door moves while I am away, log once. Re-arm when I get home.",
+      machine: %{
+        initial: :armed,
+        states: %{
+          armed: [
+            %{
+              on: {:changes_under, [:door]},
+              # Enumerated rather than `!= :home`, so an :unknown zone -- we
+              # lost the phone -- cannot fire an intruder alert.
+              when: "person.caleb.zone == :work or person.caleb.zone == :gym",
+              do: [{:log, :warning, "unexpected activity at home while I am away"}],
+              goto: :fired
+            }
+          ],
+          fired: [
+            %{
+              on: {:enters, [:person, :caleb, :zone], :home},
+              do: [{:log, :info, "intruder latch re-armed"}],
+              goto: :armed
+            }
+          ]
+        }
+      }
     },
 
     # --- doors -------------------------------------------------------------

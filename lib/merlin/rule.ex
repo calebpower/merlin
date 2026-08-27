@@ -87,19 +87,21 @@ defmodule Merlin.Rule do
     Enum.any?(triggers, &trigger_fires?(&1, subject))
   end
 
-  defp trigger_fires?({:changes, path}, %Merlin.Change{path: p}), do: p == path
+  @doc "Whether one trigger fires for a change or event. Shared with `Merlin.Machine`."
+  @spec trigger_fires?(trigger(), Merlin.Change.t() | Merlin.Event.t()) :: boolean()
+  def trigger_fires?({:changes, path}, %Merlin.Change{path: p}), do: p == path
 
-  defp trigger_fires?({:changes_under, prefix}, %Merlin.Change{path: p}),
+  def trigger_fires?({:changes_under, prefix}, %Merlin.Change{path: p}),
     do: Merlin.Path.prefix?(prefix, p)
 
-  defp trigger_fires?({:enters, path, value}, %Merlin.Change{path: p, new: new, old: old}),
+  def trigger_fires?({:enters, path, value}, %Merlin.Change{path: p, new: new, old: old}),
     do: p == path and new == value and old != value
 
-  defp trigger_fires?({:leaves, path, value}, %Merlin.Change{path: p, new: new, old: old}),
+  def trigger_fires?({:leaves, path, value}, %Merlin.Change{path: p, new: new, old: old}),
     do: p == path and old == value and new != value
 
-  defp trigger_fires?({:receives, path}, %Merlin.Event{path: p}), do: p == path
-  defp trigger_fires?(_, _), do: false
+  def trigger_fires?({:receives, path}, %Merlin.Event{path: p}), do: p == path
+  def trigger_fires?(_, _), do: false
 
   # --- compilation ----------------------------------------------------------
 
@@ -116,12 +118,14 @@ defmodule Merlin.Rule do
 
   defp compile_triggers(id, _), do: {:error, {id, :triggers_not_a_list}}
 
-  defp validate_trigger({:changes, path}) when is_list(path), do: :ok
-  defp validate_trigger({:changes_under, path}) when is_list(path), do: :ok
-  defp validate_trigger({:enters, path, _}) when is_list(path), do: :ok
-  defp validate_trigger({:leaves, path, _}) when is_list(path), do: :ok
-  defp validate_trigger({:receives, path}) when is_list(path), do: :ok
-  defp validate_trigger(other), do: {:error, {:bad_trigger, other}}
+  @doc "Validate a trigger. Shared with `Merlin.Machine`."
+  @spec validate_trigger(term()) :: :ok | {:error, term()}
+  def validate_trigger({:changes, path}) when is_list(path), do: :ok
+  def validate_trigger({:changes_under, path}) when is_list(path), do: :ok
+  def validate_trigger({:enters, path, _}) when is_list(path), do: :ok
+  def validate_trigger({:leaves, path, _}) when is_list(path), do: :ok
+  def validate_trigger({:receives, path}) when is_list(path), do: :ok
+  def validate_trigger(other), do: {:error, {:bad_trigger, other}}
 
   defp compile_guard(_id, nil), do: {:ok, nil}
 
@@ -150,6 +154,17 @@ defmodule Merlin.Rule do
   # Action parameters may be literals or expressions. Expressions are compiled
   # here, at boot, so a typo in an action is a boot failure rather than a
   # surprise at 3am when the rule first fires.
+  @doc "Compile a list of actions. Shared with `Merlin.Machine`."
+  @spec compile_action_list([term()]) :: {:ok, [action()]} | {:error, term()}
+  def compile_action_list(actions) when is_list(actions) do
+    Enum.reduce_while(actions, {:ok, []}, fn action, {:ok, acc} ->
+      case compile_action(action) do
+        {:ok, compiled} -> {:cont, {:ok, acc ++ [compiled]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
   defp compile_action({:set_group, group, value}) when is_atom(group) do
     with {:ok, v} <- compile_value(value), do: {:ok, {:set_group, group, v}}
   end
@@ -169,14 +184,16 @@ defmodule Merlin.Rule do
 
   defp compile_action(other), do: {:error, {:bad_action, other}}
 
-  defp compile_value({:expr, source}) when is_binary(source) do
+  @doc "Compile an action parameter: a literal, or `{:expr, source}`."
+  @spec compile_value(term()) :: {:ok, term()} | {:error, term()}
+  def compile_value({:expr, source}) when is_binary(source) do
     case Expr.compile(source) do
       {:ok, expr} -> {:ok, {:expr, expr}}
       {:error, reason} -> {:error, {:bad_expression, source, reason}}
     end
   end
 
-  defp compile_value(literal), do: {:ok, {:lit, literal}}
+  def compile_value(literal), do: {:ok, {:lit, literal}}
 
   # --- watch derivation -----------------------------------------------------
 

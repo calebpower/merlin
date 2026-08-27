@@ -16,8 +16,7 @@ defmodule Merlin.Derive.Supervisor do
   @impl true
   def init(_opts) do
     children =
-      [{Registry, keys: :unique, name: Merlin.Derive.Registry}] ++
-        Enum.map(Merlin.Config.derived(), &child_spec_for/1)
+      Enum.map(Merlin.Config.derived(), &child_spec_for/1)
 
     Supervisor.init(children, strategy: :one_for_one)
   end
