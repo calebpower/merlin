@@ -101,6 +101,22 @@ mix deps.get
 say "compile (warnings are errors)"
 mix compile --warnings-as-errors
 
+# ---------------------------------------------------------------------------
+# Static analysis, as a build gate rather than a tier.
+#
+# It does not belong in the tiered battery: the tiers are a portfolio of
+# ORACLES, each answering "did this behave correctly", and dialyzer answers a
+# different question entirely -- whether the code is self-consistent about the
+# shapes it passes around. Something that cannot type-check should not reach
+# the point of being tested, in the same way something that cannot compile
+# should not.
+#
+# The PLT lives in the build cache. First run costs minutes; every run after
+# it costs seconds.
+# ---------------------------------------------------------------------------
+say "dialyzer"
+MIX_ENV=test mix dialyzer --format dialyxir
+
 say "release"
 mix release --overwrite
 

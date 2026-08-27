@@ -381,4 +381,34 @@ defmodule Merlin.ExprTest do
       end
     end
   end
+
+  describe "scoped reads that are not well-formed" do
+    test "a single-key scoped read compiles" do
+      assert {:ok, _} = Expr.compile("local.x")
+      assert {:ok, _} = Expr.compile("trigger.value")
+    end
+
+    # These used to compile into a closure that raised when the rule ran, so a
+    # typo in a guard became a rule that was skipped forever and logged once
+    # per event -- a config error presenting as a mysteriously inert house.
+    # A bad expression must fail at boot, like every other bad config.
+    test "a multi-segment scoped read is refused at compile time" do
+      for source <- ["local.a.b", "trigger.x.y", "local.a.b.c"] do
+        assert {:error, {:bad_scoped_read, _}} = Expr.compile(source),
+               "#{source} compiled instead of being refused"
+      end
+    end
+
+    test "the refusal names what was wrong" do
+      assert {:error, {:bad_scoped_read, text}} = Expr.compile("trigger.x.y")
+      assert text =~ "trigger.x.y"
+    end
+
+    # A dotted path that is NOT scoped is an ordinary fact read of any depth,
+    # and must keep working -- the fix must not have narrowed those too.
+    test "ordinary fact paths of any depth still compile" do
+      assert {:ok, _} = Expr.compile("a.b.c.d.e")
+      assert {:ok, _} = Expr.compile("person.caleb.zone")
+    end
+  end
 end

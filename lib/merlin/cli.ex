@@ -159,6 +159,7 @@ defmodule Merlin.CLI do
     unix |> DateTime.from_unix!() |> DateTime.to_string()
   end
 
+  @spec die(binary()) :: no_return()
   defp die(message) do
     IO.puts(:stderr, "merlin-key: #{message}")
     System.halt(1)

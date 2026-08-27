@@ -18,6 +18,33 @@
   # done. Three of the rules it replaces have never fired in production.
   dry_run: true,
 
+  # How long after boot -- and after every broker reconnect -- merlin learns
+  # the state of the house without acting on it. Retained messages replay in a
+  # burst on connect and are indistinguishable from the whole house changing at
+  # once; without this the intruder latch fires and the lamps toggle every time
+  # the wifi hiccups.
+  settle_ms: 15_000,
+
+  # Facts that survive a restart.
+  #
+  # Device state is deliberately absent. The broker already re-announces every
+  # plug and door via retained messages on connect, and persisting them here
+  # would mean two sources of truth for the same value, with merlin's copy
+  # being the stale one.
+  #
+  # What is here is what nothing else can tell us again: where people and
+  # vehicles were. These carry stale_after, so a restart that takes two hours
+  # restores them already stale and they read :unknown -- which is the honest
+  # answer and the entire reason the snapshot records ages rather than values
+  # alone.
+  #
+  # Machine state and data slots are NOT listed: a machine declares
+  # `persist: true` beside its own states, and contributes [:rule, <id>] itself.
+  persist: [
+    [:person],
+    [:vehicle]
+  ],
+
   # Zones each carry their own size, and leaving requires travelling further
   # than arriving did. The Python had ONE 0.25-mile constant serving as every
   # geofence radius and as the phone-to-vehicle distance, with no hysteresis at
@@ -484,6 +511,10 @@
       machine: %{
         initial: :idle,
         data: %{desired: :off},
+        # `desired` is the only record of what I actually want the A/C set to.
+        # Losing it on restart means the next restore turns the A/C to whatever
+        # the plug happened to be reporting.
+        persist: true,
         states: %{
           idle: [
             # While idle, what the plug reports IS what I want.
@@ -577,6 +608,10 @@
       desc: "If a door moves while I am away, log once. Re-arm when I get home.",
       machine: %{
         initial: :armed,
+        # A latch that re-arms on restart is not a latch. alerts.py held this
+        # in an instance variable and every restart silently forgave whatever
+        # had already happened.
+        persist: true,
         states: %{
           armed: [
             %{

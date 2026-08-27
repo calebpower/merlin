@@ -80,6 +80,23 @@ defmodule Merlin.World.Writer do
     GenServer.call(__MODULE__, {:emit, path, payload, opts})
   end
 
+  @doc """
+  Insert facts verbatim, as restored from a snapshot.
+
+  Deliberately not `put/3`. `put/3` stamps `observed_at` with the current time,
+  which is exactly wrong here: a fact restored from a two-day-old snapshot must
+  arrive two days old so that `stale_after` can do its job. These facts carry
+  the ages the snapshot computed for them.
+
+  Nothing is published. A restore is not a change -- it is the world resuming
+  the shape it already had -- and the rules engine has not started yet in any
+  case. Returns the number of facts inserted.
+  """
+  @spec restore([Fact.t()]) :: non_neg_integer()
+  def restore(facts) when is_list(facts) do
+    GenServer.call(__MODULE__, {:restore, facts})
+  end
+
   @impl true
   def init(_opts), do: {:ok, %{}}
 
@@ -97,6 +114,23 @@ defmodule Merlin.World.Writer do
     else
       {:reply, do_put(path, value, opts, depth), state}
     end
+  end
+
+  @impl true
+  def handle_call({:restore, facts}, _from, state) do
+    table = Table.table()
+
+    count =
+      Enum.count(facts, fn %Fact{} = fact ->
+        # A real sequence number, because seq must stay monotonic across the
+        # table for anything that compares them. The snapshot's own seq is
+        # from a previous VM and means nothing here.
+        seq = :ets.update_counter(table, Table.seq_key(), 1)
+        :ets.insert(table, {fact.path, %{fact | seq: seq}})
+        true
+      end)
+
+    {:reply, count, state}
   end
 
   @impl true

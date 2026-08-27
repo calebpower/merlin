@@ -38,28 +38,54 @@ defmodule Merlin.ConcurrencyTest do
       # Open one connection first so the schema exists before the storm.
       KeyStore.with_db(db, fn _ -> :ok end)
 
-      results =
-        1..40
-        |> Task.async_stream(
-          fn i ->
-            KeyStore.with_db(db, fn conn ->
-              {:ok, plaintext, _row} = KeyStore.mint(conn, "topic/#{i}", label: "t#{i}")
-              plaintext
-            end)
-          end,
-          max_concurrency: 20,
-          timeout: 30_000
-        )
-        |> Enum.map(fn {:ok, key} -> key end)
+      # 200 writers, all released at once against their own connections.
+      #
+      # The earlier version used 40 and passed eight runs in a row while
+      # `exec/3` matched SQLite's `:busy` against `:done` -- a crash waiting
+      # for a busy enough moment. A concurrency test that reproduces its target
+      # defect one run in ten is not a test, it is a rumour, so this opens
+      # every connection first and then starts every writer from a single
+      # barrier rather than letting Task.async_stream trickle them in.
+      writers = 200
+      parent = self()
 
-      assert length(results) == 40
-      assert length(Enum.uniq(results)) == 40, "keys collided"
+      pids =
+        for i <- 1..writers do
+          spawn_link(fn ->
+            KeyStore.with_db(db, fn conn ->
+              send(parent, {:ready, self()})
+
+              receive do
+                :go -> :ok
+              end
+
+              {:ok, plaintext, _row} = KeyStore.mint(conn, "topic/#{i}", label: "t#{i}")
+              send(parent, {:minted, i, plaintext})
+            end)
+          end)
+        end
+
+      for _ <- pids, do: assert_receive({:ready, _}, 30_000)
+      for pid <- pids, do: send(pid, :go)
+
+      # Keyed by writer, because these arrive in completion order rather than
+      # spawn order -- the whole point of releasing them from a barrier.
+      minted =
+        Map.new(pids, fn _ ->
+          assert_receive {:minted, i, key}, 60_000
+          {i, key}
+        end)
+
+      results = Map.values(minted)
+
+      assert map_size(minted) == writers
+      assert length(Enum.uniq(results)) == writers, "keys collided"
 
       # Every one resolves, from a fresh connection, to its own topic.
       KeyStore.with_db(db, fn conn ->
-        assert KeyStore.count(conn) == 40
+        assert KeyStore.count(conn) == writers
 
-        for {key, i} <- Enum.with_index(results, 1) do
+        for {i, key} <- minted do
           assert {:ok, topic, _id} = KeyStore.resolve(conn, key)
           assert topic == "topic/#{i}"
         end

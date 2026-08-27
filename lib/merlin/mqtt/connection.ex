@@ -147,6 +147,16 @@ defmodule Merlin.MQTT.Connection do
   end
 
   def handle_info({:mqtt_connection, :up}, state) do
+    # BEFORE subscribing, not after. The broker starts replaying retained
+    # messages the instant the subscription lands, so a window opened
+    # afterwards is a race -- and the messages that lose it are exactly the
+    # door reports the intruder latch is watching for.
+    #
+    # Every :up, not just the first. A wifi blip at 3am replays the whole
+    # retained set into a daemon that has been running for weeks, which is the
+    # case a boot-only window would miss entirely.
+    Merlin.Settle.begin("broker connected -- retained messages replay now")
+
     # Subscribe here, not at connect. Every :up re-establishes the set, so a
     # reconnect needs no special handling.
     case state.client.subscribe(state.handle, state.subscriptions) do
@@ -226,7 +236,27 @@ defmodule Merlin.MQTT.Connection do
     World.emit(path, payload, source: {:adapter, module})
   end
 
-  defp apply_emission({:publish, topic, payload, opts}, _module, state) do
+  # Adapters reach the broker without going through Merlin.Effects, so the
+  # settle window has to be applied here as well or it has a hole exactly the
+  # width of every adapter. An adapter emitting a publish in response to a
+  # retained message is the same event the window exists to absorb.
+  #
+  # This does mean the ping/pong liveness harness goes unanswered for the first
+  # few seconds, which is not a bug being tolerated -- it is the daemon saying
+  # truthfully that it is not acting yet. `/healthz` and `bin/merlin rpc` both
+  # answer throughout.
+  defp apply_emission({:publish, topic, payload, opts} = emission, module, state) do
+    if Merlin.Settle.settling?() and Merlin.Settle.suppresses?(emission) do
+      Logger.info(
+        "[settling #{Merlin.Settle.remaining_ms()}ms] held: publish #{topic} " <>
+          "from #{inspect(module)}"
+      )
+    else
+      do_publish(topic, payload, opts, state)
+    end
+  end
+
+  defp do_publish(topic, payload, opts, state) do
     if state.connected? do
       state.client.publish(state.handle, topic, payload, opts)
     else

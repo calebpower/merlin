@@ -96,6 +96,8 @@ defmodule Merlin.Config.File do
     errors =
       List.flatten([
         plain_data_errors(term),
+        unknown_key_errors(term),
+        persist_errors(term),
         groups_errors(term),
         sources_errors(term),
         zones_errors(term),
@@ -260,6 +262,64 @@ defmodule Merlin.Config.File do
     end)
   end
 
+  # Every key merlin actually reads. A config key it does not read is a typo,
+  # and a typo here is silent: `persits:` disables persistence, `dry_run` typed
+  # wrong actuates the house, and neither fails anywhere. That is the defect
+  # this whole milestone is about, in the file that configures it.
+  @known_keys [
+    :mqtt,
+    :api,
+    :dry_run,
+    :settle_ms,
+    :persist,
+    :zones,
+    :colocation_distance,
+    :groups,
+    :sources,
+    :derived,
+    :rules
+  ]
+
+  @doc "The top-level configuration keys merlin reads."
+  @spec known_keys() :: [atom()]
+  def known_keys, do: @known_keys
+
+  # No non-map clause: validate/1 rejects a non-map before reaching here, and
+  # a fallback that can never run is a fallback nobody can test.
+  defp unknown_key_errors(term) do
+    term
+    |> Map.keys()
+    |> Enum.reject(&(&1 in @known_keys))
+    |> Enum.map(&{:unknown_key, &1, did_you_mean(&1)})
+  end
+
+  # A typo is nearly always one edit away from the key that was meant, and
+  # naming the intended key turns a refusal to boot into a one-line fix.
+  defp did_you_mean(key) do
+    name = Atom.to_string(key)
+
+    @known_keys
+    |> Enum.map(&{&1, String.jaro_distance(name, Atom.to_string(&1))})
+    |> Enum.filter(fn {_k, score} -> score > 0.8 end)
+    |> Enum.max_by(fn {_k, score} -> score end, fn -> nil end)
+    |> case do
+      {suggestion, _score} -> suggestion
+      nil -> nil
+    end
+  end
+
+  defp persist_errors(term) do
+    case Map.get(term, :persist, []) do
+      list when is_list(list) ->
+        list
+        |> Enum.reject(&(is_list(&1) and &1 != [] and Enum.all?(&1, fn s -> is_atom(s) end)))
+        |> Enum.map(&{:bad_persist_prefix, &1})
+
+      other ->
+        [{:persist_not_a_list, other}]
+    end
+  end
+
   defp derived_errors(term) do
     zone_ids = term |> Map.get(:zones, []) |> Enum.map(& &1[:id]) |> MapSet.new()
 
@@ -380,20 +440,55 @@ defmodule Merlin.Config.File do
         do: action
   end
 
+  # Built from @known_keys rather than from a second hand-written list.
+  #
+  # Two lists that must agree -- one naming what is legal, one naming what is
+  # kept -- is the same shape as the deep validator beside the shallow
+  # resolver, and it failed the same way: `persist:` and `settle_ms:` validated
+  # cleanly, were dropped here, and the daemon silently ran with no persistence
+  # and a default settle window. `api:` was being dropped too, so an api port
+  # in the config would have been ignored in favour of the default.
+  #
+  # Deriving one from the other means adding a key cannot half-work.
   defp build(term, rules) do
-    %{
-      mqtt: Map.get(term, :mqtt, %{}),
-      dry_run: Map.get(term, :dry_run, false),
-      groups: term |> Map.get(:groups, []) |> Map.new(&{&1.id, &1}),
-      sources: Map.get(term, :sources, []),
-      zones: Merlin.Zones.compile(Map.get(term, :zones, [])),
-      colocation_distance: Map.get(term, :colocation_distance, {0.25, :mi}),
-      derived: Map.get(term, :derived, []),
-      rules: rules
-    }
+    Map.new(@known_keys, fn key -> {key, built(key, term, rules)} end)
   end
 
+  defp built(:rules, _term, rules), do: rules
+
+  defp built(:groups, term, _rules),
+    do: term |> Map.get(:groups, []) |> Map.new(&{&1.id, &1})
+
+  defp built(:zones, term, _rules), do: Merlin.Zones.compile(Map.get(term, :zones, []))
+  defp built(:mqtt, term, _rules), do: Map.get(term, :mqtt, %{})
+  defp built(:api, term, _rules), do: Map.get(term, :api, %{})
+  defp built(:dry_run, term, _rules), do: Map.get(term, :dry_run, false)
+  defp built(:settle_ms, term, _rules), do: Map.get(term, :settle_ms, Merlin.Settle.default_ms())
+  defp built(:persist, term, _rules), do: Map.get(term, :persist, [])
+  defp built(:sources, term, _rules), do: Map.get(term, :sources, [])
+  defp built(:derived, term, _rules), do: Map.get(term, :derived, [])
+
+  defp built(:colocation_distance, term, _rules),
+    do: Map.get(term, :colocation_distance, {0.25, :mi})
+
   # --- error rendering ------------------------------------------------------
+
+  defp describe({:unknown_key, key, nil}),
+    do:
+      "unknown top-level key #{inspect(key)} -- merlin does not read it, so whatever " <>
+        "you set there has no effect. Known keys: #{Enum.map_join(@known_keys, ", ", &inspect/1)}"
+
+  defp describe({:unknown_key, key, suggestion}),
+    do: "unknown top-level key #{inspect(key)} -- did you mean #{inspect(suggestion)}?"
+
+  defp describe({:bad_persist_prefix, prefix}),
+    do: "persist: #{inspect(prefix)} is not a non-empty path, e.g. [:person] or [:rule, :my_latch]"
+
+  defp describe({:persist_not_a_list, other}),
+    do: "persist: must be a list of paths, got #{inspect(other)}"
+
+  defp describe({:duplicate_producer, path, ids}),
+    do: "#{path} is written by more than one derived fact: #{Enum.map_join(ids, ", ", &inspect/1)}"
 
   defp describe({:missing_file, path}), do: "config file not found: #{path}"
   defp describe({:eval_failed, path, message}), do: "could not evaluate #{path}: #{message}"

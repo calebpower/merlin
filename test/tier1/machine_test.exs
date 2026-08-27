@@ -350,6 +350,112 @@ defmodule Merlin.MachineTest do
 
   # --- the latch ------------------------------------------------------------
 
+  describe "resuming from a snapshot" do
+    defp persistent_latch(id, opts \\ []) do
+      %{
+        id: id,
+        desc: "test latch",
+        machine: %{
+          initial: :armed,
+          persist: Keyword.get(opts, :persist, true),
+          data: %{desired: :off},
+          states: %{
+            armed: [%{on: {:changes, [:"door_#{id}"]}, goto: :fired}],
+            fired: [%{on: {:enters, [:"zone_#{id}"], :home}, goto: :armed}]
+          }
+        }
+      }
+    end
+
+    # A latch that re-arms on restart is not a latch. alerts.py held this in an
+    # instance variable, so every restart silently forgave whatever had already
+    # happened -- and a re-armed latch is indistinguishable from one that was
+    # never tripped.
+    test "a persistent machine resumes the state the world already holds" do
+      id = :"resume_#{uniq()}"
+      World.put([:rule, id, :state], :fired)
+
+      start(persistent_latch(id))
+      assert Server.state(id) == :fired
+    end
+
+    test "data slots resume too" do
+      # Asserted here rather than in tier 6, where the broker replays a
+      # retained message that legitimately overwrites the slot and would
+      # witness the replay instead of the restore.
+      id = :"resume_#{uniq()}"
+      World.put([:rule, id, :state], :armed)
+      World.put([:rule, id, :data, :desired], :on)
+
+      start(persistent_latch(id))
+      assert Server.data(id) == %{desired: :on}
+    end
+
+    test "a slot the world has no fact for keeps its declared default" do
+      id = :"resume_#{uniq()}"
+      start(persistent_latch(id))
+      assert Server.data(id) == %{desired: :off}
+    end
+
+    # Opt-in. A machine that did not ask to persist must start where it says it
+    # starts, or every sequence in the house would resume mid-flight.
+    test "a machine without persist: true ignores what the world holds" do
+      id = :"resume_#{uniq()}"
+      World.put([:rule, id, :state], :fired)
+      World.put([:rule, id, :data, :desired], :on)
+
+      start(persistent_latch(id, persist: false))
+
+      assert Server.state(id) == :armed
+      assert Server.data(id) == %{desired: :off}
+    end
+
+    test "a state the machine no longer declares falls back to the initial one" do
+      # What a config edit looks like from the snapshot's side.
+      id = :"resume_#{uniq()}"
+      World.put([:rule, id, :state], :a_state_that_was_deleted)
+
+      start(persistent_latch(id))
+      assert Server.state(id) == :armed
+    end
+
+    test "a non-atom state is refused rather than crashing init" do
+      id = :"resume_#{uniq()}"
+      World.put([:rule, id, :state], "fired")
+
+      start(persistent_latch(id))
+      assert Server.state(id) == :armed
+    end
+
+    # How much of a ten-second dwell remains after a restart of unknown length
+    # is unknowable, and both guesses act wrongly: a full timer leaves the A/C
+    # shed past the end of the print, and no timer leaves the printer powered
+    # off indefinitely. Falling back to the initial state is the only option
+    # that is merely forgetful.
+    test "a state with a deadline is NOT resumed" do
+      id = :"resume_#{uniq()}"
+
+      spec = %{
+        id: id,
+        desc: "test sequence",
+        machine: %{
+          initial: :idle,
+          persist: true,
+          states: %{
+            idle: [%{on: {:changes, [:"go_#{id}"]}, goto: :dwell}],
+            dwell: [%{on: {:after, {10, :millisecond}}, goto: :idle}]
+          }
+        }
+      }
+
+      World.put([:rule, id, :state], :dwell)
+      start(spec)
+
+      assert Server.state(id) == :idle,
+             "resumed into a state whose timer had already been running for an unknown time"
+    end
+  end
+
   describe "a latch (the intruder alert)" do
     defp latch_machine(id, trigger_path, rearm_path) do
       %{

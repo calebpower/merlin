@@ -61,7 +61,9 @@ defmodule Merlin.KeyStore do
     with :ok <- File.mkdir_p(Path.dirname(path)),
          {:ok, conn} <- Sqlite3.open(path) do
       # WAL is what allows the CLI and the daemon to hold the file at the same
-      # time. busy_timeout stops a concurrent writer failing outright.
+      # time. busy_timeout handles lock contention but NOT a write-write
+      # conflict, which SQLite reports immediately and which only a rollback
+      # and retry can resolve -- see the retry around exec/query below.
       :ok = Sqlite3.execute(conn, "PRAGMA journal_mode=WAL")
       :ok = Sqlite3.execute(conn, "PRAGMA busy_timeout=5000")
       :ok = Sqlite3.execute(conn, "PRAGMA foreign_keys=ON")
@@ -126,7 +128,7 @@ defmodule Merlin.KeyStore do
   is not recoverable afterwards -- callers must show it to the operator or
   lose it.
   """
-  @spec mint(term(), binary(), keyword()) :: {:ok, binary(), key_row()} | {:error, term()}
+  @spec mint(term(), binary(), keyword()) :: {:ok, binary(), key_row()}
   def mint(conn, topic, opts \\ []) when is_binary(topic) do
     plaintext = generate()
     hash = hash(plaintext)
@@ -149,7 +151,11 @@ defmodule Merlin.KeyStore do
         [hash, prefix, topic, Keyword.get(opts, :label), now, expires_at]
       )
 
-    id = Sqlite3.last_insert_rowid(conn)
+    # last_insert_rowid/1 answers {:ok, integer}. Taking it unwrapped put
+    # `id: {:ok, 5}` into every row mint/3 returned, against a key_row() type
+    # that says `id: integer()` -- so `merlin-key add` reported a tuple as the
+    # key's id, and any caller comparing ids compared the wrong thing.
+    {:ok, id} = Sqlite3.last_insert_rowid(conn)
 
     {:ok, plaintext,
      %{
@@ -284,7 +290,12 @@ defmodule Merlin.KeyStore do
   @spec import_legacy(term(), binary()) :: {:ok, non_neg_integer()} | {:error, term()}
   def import_legacy(conn, legacy_path) do
     if File.exists?(legacy_path) do
-      {:ok, old} = Sqlite3.open(legacy_path, [:readonly])
+      # `mode: :readonly`, a keyword -- NOT `[:readonly]`, which is a list of
+      # bare atoms that exqlite does not accept. Dialyzer caught it: the call
+      # could not succeed. The docstring above and the line the CLI prints to
+      # the operator both promise the legacy database is untouched, and during
+      # a cutover that promise is the rollback plan.
+      {:ok, old} = Sqlite3.open(legacy_path, mode: :readonly)
 
       try do
         rows = query(old, "SELECT topic, key FROM API_Key", [])
@@ -327,19 +338,70 @@ defmodule Merlin.KeyStore do
   @spec generate() :: binary()
   def generate, do: Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
 
-  defp exec(conn, sql, args) do
+  # `PRAGMA busy_timeout` is necessary and NOT sufficient.
+  #
+  # SQLite's busy handler cannot resolve a write-write conflict in WAL mode:
+  # when two connections have both begun writing, one gets SQLITE_BUSY
+  # immediately and no amount of waiting inside SQLite will help, because the
+  # only resolution is for the loser to roll back and start again. exqlite
+  # surfaces that as `:busy`, and matching it against `:done` turns ordinary
+  # contention into a crash.
+  #
+  # That is precisely the case merlin is built around: `merlin-key add` runs
+  # while the daemon is serving. It is rare enough to have passed tier 8 eight
+  # times in a row and real enough to lose someone their phone key at the
+  # moment they are minting one.
+  @busy_attempts 8
+  @busy_backoff_ms 25
+
+  defp exec(conn, sql, args), do: exec(conn, sql, args, 1)
+
+  defp exec(conn, sql, args, attempt) do
     {:ok, stmt} = Sqlite3.prepare(conn, sql)
     :ok = Sqlite3.bind(stmt, args)
-    :done = Sqlite3.step(conn, stmt)
-    :ok = Sqlite3.release(conn, stmt)
-    :ok
+
+    case Sqlite3.step(conn, stmt) do
+      :done ->
+        :ok = Sqlite3.release(conn, stmt)
+        :ok
+
+      :busy ->
+        :ok = Sqlite3.release(conn, stmt)
+        retry(conn, sql, args, attempt, &exec/4)
+    end
   end
 
-  defp query(conn, sql, args) do
+  defp query(conn, sql, args), do: query(conn, sql, args, 1)
+
+  defp query(conn, sql, args, attempt) do
     {:ok, stmt} = Sqlite3.prepare(conn, sql)
     :ok = Sqlite3.bind(stmt, args)
-    {:ok, rows} = Sqlite3.fetch_all(conn, stmt)
-    :ok = Sqlite3.release(conn, stmt)
-    rows
+
+    case Sqlite3.fetch_all(conn, stmt) do
+      {:ok, rows} ->
+        :ok = Sqlite3.release(conn, stmt)
+        rows
+
+      {:error, :busy} ->
+        :ok = Sqlite3.release(conn, stmt)
+        retry(conn, sql, args, attempt, &query/4)
+    end
   end
+
+  # Bounded, and it gives up loudly. An unbounded retry against a genuinely
+  # stuck writer is a hang, which is harder to diagnose than a crash.
+  defp retry(_conn, sql, _args, attempt, _fun) when attempt >= @busy_attempts do
+    raise RuntimeError,
+          "sqlite stayed busy through #{@busy_attempts} attempts: #{sql}. " <>
+            "Another process is holding a write transaction open."
+  end
+
+  defp retry(conn, sql, args, attempt, fun) do
+    # Jittered, so two contending writers do not retry in lockstep forever.
+    Process.sleep(@busy_backoff_ms * attempt + :rand.uniform(@busy_backoff_ms))
+    fun.(conn, sql, args, attempt + 1)
+  end
+
+  @doc "Attempts made against a busy database before giving up. Exposed for tests."
+  def busy_attempts, do: @busy_attempts
 end

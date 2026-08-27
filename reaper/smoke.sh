@@ -64,6 +64,12 @@ say "secrets: $MERLIN_SECRETS (0600, all endpoints closed loopback)"
 # broker. Turn it off for the smoke run only.
 export MERLIN_DRY_RUN=false
 
+# A real settle window, shortened. Setting it to 0 would make every assertion
+# below pass while removing the behaviour M7 exists to add -- so this tier
+# keeps the window and tests it, and pays three seconds for the privilege.
+MERLIN_SETTLE_MS=3000
+export MERLIN_SETTLE_MS
+
 # Distinct ports so a leftover daemon from an earlier run cannot be the thing
 # answering -- a check that talks to the wrong process is worse than no check.
 MERLIN_PUBLIC_PORT=18080
@@ -93,10 +99,71 @@ trap cleanup EXIT INT TERM
 say "starting the release"
 "$REL/bin/merlin" daemon || die "release failed to start"
 
+# ---------------------------------------------------------------------------
+# The settle window (bug 8).
+#
+# Readiness is asked of the node directly, not inferred from a pong: during the
+# settle window merlin deliberately does not publish, so waiting for a pong
+# here would be waiting for the window to close and would prove nothing about
+# either.
+# ---------------------------------------------------------------------------
+# Readiness must mean "merlin can answer", not "the VM accepts RPC".
+#
+# `IO.puts("up")` succeeds as soon as the beam is listening, which is BEFORE
+# the supervision tree has finished starting -- so the next call found no ETS
+# table and returned nothing, and the caller read that empty string as a
+# failed assertion about the house. Touching the world is the probe: it throws
+# until the table exists, which is exactly the condition being waited on.
+node_ready() {
+    "$REL/bin/merlin" rpc '_ = Merlin.World.dump([]); IO.puts("up")' \
+        2>>"$REAPER_OUT/smoke-rpc.err" | tail -1
+}
+
+await_node() {
+    i=0
+    while [ "$i" -lt 80 ]; do
+        [ "$(node_ready)" = "up" ] && return 0
+        i=$((i + 1))
+        sleep 0.25
+    done
+    return 1
+}
+
+say "waiting for the node"
+await_node || die "the node never came up"
+say "node up"
+
+# It must actually still be settling, or the assertion below proves nothing.
+settling=$("$REL/bin/merlin" rpc \
+    'IO.puts(to_string(Merlin.Settle.settling?()))' 2>>"$REAPER_OUT/smoke-rpc.err" | tail -1)
+[ "$settling" = "true" ] || die "the settle window had already closed -- the next check is vacuous"
+say "settle window is open"
+
+# A ping during the window must go unanswered. This is the whole of bug 8 in
+# one assertion: an inbound message that would normally produce an outward
+# publish produces nothing while merlin is still learning the house.
+settle_out="$REAPER_OUT/smoke-settle-held.txt"
+: > "$settle_out"
+/usr/local/bin/mosquitto_sub -h 127.0.0.1 -t 'test/pong' -C 1 -W 2 > "$settle_out" 2>/dev/null &
+subpid=$!
+sleep 0.3
+/usr/local/bin/mosquitto_pub -h 127.0.0.1 -t 'test/ping' -m 'during-settle' 2>/dev/null || true
+wait "$subpid" 2>/dev/null || true
+
+if [ -s "$settle_out" ]; then
+    die "merlin published during the settle window (got '$(cat "$settle_out")') -- retained-message replay would actuate the house"
+fi
+say "settle window held an outward publish, as it must"
+
+# The log evidence for this is asserted later, once the daemon has been
+# running long enough for run_erl to have flushed its console buffer. Three
+# seconds after boot it holds only the startup banner, and a check there was
+# testing the buffer rather than the behaviour.
+
 # Poll for a working round-trip rather than sleeping a guessed interval. The
 # daemon needs a moment to reach the broker, and a fixed sleep would either be
 # slow or flaky depending on the guest's mood.
-say "waiting for ping/pong"
+say "waiting for the window to close and ping/pong to work"
 i=0
 got=""
 while [ "$i" -lt 30 ]; do
@@ -416,6 +483,15 @@ for poller in hapn weather; do
 done
 say "both pollers reported their failure by name"
 
+# The settle window's log evidence, checked here rather than at boot because
+# by now the console buffer has certainly flushed. A window that suppresses
+# silently is indistinguishable from a daemon that has stopped working, and
+# the log line naming the held effect is the only thing that tells them apart.
+case "$poll_log" in
+    *"settling"*) say "the settle window's suppression is recorded in the log" ;;
+    *) die "nothing in the log records the settle suppression -- it cannot be diagnosed" ;;
+esac
+
 # No poller may terminate. Not "no supervisor report" -- the actual crash was
 # logged as `GenServer ... terminating`, which the earlier pattern missed.
 if printf '%s\n' "$poll_log" | grep -qE "HttpPoll, :(hapn|weather)\}\} terminating|reached_max_restart"; then
@@ -567,5 +643,87 @@ if [ -s "$dry_out" ]; then
     die "dry_run did NOT block the publish -- got '$(cat "$dry_out")' on test/pong"
 fi
 say "dry_run blocked the publish, as it must"
+
+# ---------------------------------------------------------------------------
+# Persistence and the restart (bug 8).
+#
+# The acceptance-gate case: leave, have a door move, then restart the daemon
+# and require the latch to still be latched. The Python held this in an
+# instance variable, so every restart silently forgave whatever had already
+# happened -- and the failure was invisible, because a re-armed latch looks
+# exactly like a latch that was never tripped.
+#
+# Driven entirely through real interfaces: a real /snitch POST for the
+# position and a real MQTT publish for the door. No fact is written directly,
+# because a backdoor here would prove that the snapshot round-trips and
+# nothing about whether the house can actually reach this state.
+# ---------------------------------------------------------------------------
+say "checking the intruder latch survives a restart (bug 8)"
+
+restart_out="$REAPER_OUT/smoke-restart-key.txt"
+"$KEYBIN" add --topic 'http/mobile/ariia/state' --label restart > "$restart_out" 2>&1 \
+    || { cat "$restart_out"; die "merlin-key add failed for the restart check"; }
+API_KEY=$(sed -n 's/.*[Kk]ey: *//p' "$restart_out" | tail -1)
+[ -n "$API_KEY" ] || { cat "$restart_out"; die "no key in merlin-key add output"; }
+
+# At work: 35.9132,-84.3110 is the centre of the work zone.
+say "posting a position at work"
+post_position 35.9132 -84.3110
+await_zone ":work" || die "expected zone :work, got $(zone_now)"
+
+latch_now() {
+    "$REL/bin/merlin" rpc \
+        'IO.puts(inspect(Merlin.World.get([:rule, :intruder_latch, :state])))' \
+        2>>"$REAPER_OUT/smoke-rpc.err" | tail -1
+}
+
+[ "$(latch_now)" = ":armed" ] || die "the latch is not armed before the test (got $(latch_now))"
+
+say "opening a door while away"
+/usr/local/bin/mosquitto_pub -h 127.0.0.1 \
+    -t 'home/garage/sensor/contact' -m '{"state":"ON"}' 2>/dev/null
+
+i=0
+while [ "$i" -lt 20 ]; do
+    [ "$(latch_now)" = ":fired" ] && break
+    i=$((i + 1))
+    sleep 0.2
+done
+[ "$(latch_now)" = ":fired" ] || die "the latch did not fire on a door moving while away (got $(latch_now))"
+say "latch fired"
+
+say "stopping the daemon"
+"$REL/bin/merlin" stop >/dev/null 2>&1 || die "graceful stop failed"
+
+snap="$MERLIN_STATE_DIR/facts.snap"
+[ -s "$snap" ] || die "no snapshot at $snap after a graceful stop -- terminate/2 did not run"
+say "snapshot written: $(wc -c < "$snap") bytes"
+
+say "starting it again"
+"$REL/bin/merlin" daemon || die "release failed to restart"
+
+await_node || die "the node never came back up"
+
+# THE ASSERTION. A latch that re-arms on restart is not a latch.
+[ "$(latch_now)" = ":fired" ] \
+    || die "the latch re-armed across a restart (got $(latch_now)) -- bug 8 is back"
+say "latch survived the restart, still :fired"
+
+# The load shed's `desired` slot is deliberately NOT asserted here. While idle
+# the machine treats the plug's own report as the desire, and the broker
+# replays a retained climate message on reconnect -- so after a restart the
+# slot is correctly overwritten by what the plug says, and it would witness
+# the retained message rather than the restore. Data-slot restoration is
+# asserted deterministically in tier 1 instead, where no broker is involved.
+
+# And it must be a genuine restore rather than a machine that happens to start
+# latched: the log has to say where it resumed from.
+restart_log=$(find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec cat {} + 2>/dev/null)
+case "$restart_log" in
+    *"resumed in fired from the snapshot"*)
+        say "the restore is recorded in the log" ;;
+    *)
+        die "the latch is :fired but nothing records a restore -- it may never have re-armed at all" ;;
+esac
 
 say "smoke ok"

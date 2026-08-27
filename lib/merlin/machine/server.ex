@@ -63,13 +63,81 @@ defmodule Merlin.Machine.Server do
     Enum.each(machine.watches, &Bus.subscribe/1)
     Enum.each(machine.watch_events, &Bus.subscribe_events/1)
 
+    {initial, data} = restored(machine)
+
     state = %__MODULE__{
       machine: machine,
-      data: machine.data,
+      data: data,
       dry_run: Merlin.Config.dry_run?()
     }
 
-    {:ok, machine.initial, state}
+    {:ok, initial, state}
+  end
+
+  # --- restoring from a snapshot -------------------------------------------
+
+  # A latch is only a latch if it survives a restart. `alerts.py` held its
+  # latch in an instance variable, so every restart re-armed it silently and
+  # the alert could fire again immediately -- the failure looked exactly like
+  # correct behaviour.
+  #
+  # Restores nothing unless the machine asked for it. The state and data are
+  # already published as facts, so the snapshotter needs no special knowledge
+  # of machines; this reads back what it wrote.
+  defp restored(%Machine{persist: false} = m), do: {m.initial, m.data}
+
+  defp restored(%Machine{} = m) do
+    {restored_state(m), restored_data(m)}
+  end
+
+  defp restored_state(%Machine{} = m) do
+    with {:ok, %{value: name}} when is_atom(name) <- World.fetch([:rule, m.id, :state]),
+         true <- Map.has_key?(m.states, name),
+         :ok <- resumable(m, name) do
+      if name != m.initial do
+        Logger.info("machine #{m.id}: resumed in #{name} from the snapshot")
+      end
+
+      name
+    else
+      {:error, reason} ->
+        Logger.info(
+          "machine #{m.id}: not resuming #{inspect(reason)} -- starting at #{m.initial}"
+        )
+
+        m.initial
+
+      _ ->
+        m.initial
+    end
+  end
+
+  # A state with a deadline cannot be resumed, because how much of the deadline
+  # remains is unknowable: the daemon may have been down for a second or a
+  # week, and the snapshot records when the fact was written, not how long the
+  # timer had left.
+  #
+  # Guessing either way is wrong in a way that acts. Resume with a full timer
+  # and a ten-second printer dwell becomes ten seconds *after* the restart, so
+  # the A/C stays shed for longer than the print. Resume with none and the
+  # sequence never completes, leaving the printer powered off indefinitely.
+  # Falling back to the initial state is the only option that is merely
+  # forgetful rather than actively wrong, and it says so in the log.
+  defp resumable(%Machine{states: states}, name) do
+    if Enum.any?(Map.get(states, name, []), &match?(%Clause{trigger: {:after, _}}, &1)) do
+      {:error, {:state_has_a_deadline, name}}
+    else
+      :ok
+    end
+  end
+
+  defp restored_data(%Machine{data: declared} = m) do
+    Map.new(declared, fn {slot, default} ->
+      case World.fetch([:rule, m.id, :data, slot]) do
+        {:ok, %{value: value}} -> {slot, value}
+        :error -> {slot, default}
+      end
+    end)
   end
 
   # --- state entry ----------------------------------------------------------

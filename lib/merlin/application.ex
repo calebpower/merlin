@@ -26,6 +26,12 @@ defmodule Merlin.Application do
   def start(_type, _args) do
     load_config!()
 
+    # Opened before any adapter exists, so the retained-message burst that
+    # arrives milliseconds after the broker connects is already inside the
+    # window. Opening it after the connection would be a race the daemon loses
+    # roughly as often as it wins.
+    if Merlin.Config.start_mqtt?(), do: Merlin.Settle.begin("boot")
+
     children =
       [
         # Owns the ETS table, and only that. Separated from the writer so a
@@ -36,8 +42,10 @@ defmodule Merlin.Application do
         Merlin.Bus,
 
         # The sole process permitted to write facts.
-        Merlin.World.Writer,
-
+        Merlin.World.Writer
+      ] ++
+        snapshot_children() ++
+        [
         # Registries for the named processes. Started unconditionally: tests
         # start individual machines and derived facts directly, without the
         # supervisors that would otherwise own these.
@@ -53,6 +61,17 @@ defmodule Merlin.Application do
     ]
 
     Supervisor.start_link(children, opts)
+  end
+
+  # Restores the fact snapshot, then keeps it current. Deliberately between the
+  # writer and everything that reacts: nothing can mistake a restored fact for
+  # a change, because nothing that reacts has started yet.
+  #
+  # Off under test for the same reason the broker is. Tiers 1-5 would otherwise
+  # each read and rewrite the real /var/db/merlin/facts.snap, which is both a
+  # test writing to production state and a hidden channel between tests.
+  defp snapshot_children do
+    if Merlin.Config.start_mqtt?(), do: [Merlin.Snapshot.Server], else: []
   end
 
   # Tests must not reach for a broker. Tiers 1-4 are pure by definition, and a

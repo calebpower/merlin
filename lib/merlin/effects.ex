@@ -78,11 +78,25 @@ defmodule Merlin.Effects do
     # a fact written in reaction is bounded by the writer's depth guard.
     cause = Keyword.get(opts, :cause, [])
 
+    settling? = Merlin.Settle.settling?()
+
     Enum.each(effects, fn effect ->
-      if dry? do
-        Logger.info("[dry-run] #{describe(effect)}#{rule_suffix(rule)}")
-      else
-        do_perform(effect, rule, cause)
+      cond do
+        dry? ->
+          Logger.info("[dry-run] #{describe(effect)}#{rule_suffix(rule)}")
+
+        settling? and Merlin.Settle.suppresses?(effect) ->
+          # Reported, never silent. A settle window you cannot see the workings
+          # of is indistinguishable from a daemon that has stopped acting, and
+          # the difference matters at 3am. Every held effect names itself, the
+          # rule that produced it, and how long is left.
+          Logger.info(
+            "[settling #{Merlin.Settle.remaining_ms()}ms] held: " <>
+              "#{describe(effect)}#{rule_suffix(rule)}"
+          )
+
+        true ->
+          do_perform(effect, rule, cause)
       end
     end)
 

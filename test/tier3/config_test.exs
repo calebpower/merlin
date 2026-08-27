@@ -208,6 +208,32 @@ defmodule Merlin.ConfigSourceTest do
       end
     end
 
+    test "declares what survives a restart", %{config: config} do
+      prefixes = Merlin.Config.persisted_prefixes(config)
+
+      # Presence and vehicle position: nothing else can tell us these again.
+      assert [:person] in prefixes
+      assert [:vehicle] in prefixes
+
+      # The latch, contributed by the machine's own persist: true rather than
+      # by a second list someone has to remember to edit.
+      assert [:rule, :intruder_latch] in prefixes
+
+      # Device state is NOT persisted -- retained messages are the broker's
+      # job, and a second copy would only ever be the stale one.
+      refute Enum.any?(prefixes, &Merlin.Path.prefix?(&1, [:climate, :office, :power]))
+      refute Enum.any?(prefixes, &Merlin.Path.prefix?(&1, [:door, "garage", :contact]))
+
+      assert config[:settle_ms] > 0, "the settle window is switched off in the shipped config"
+    end
+
+    test "a latch declares itself persistent", %{config: config} do
+      # A latch that re-arms on restart is not a latch, and nothing else in the
+      # system would report that it had silently stopped being one.
+      latch = Enum.find(config.rules, &(&1.id == :intruder_latch))
+      assert %Merlin.Machine{persist: true} = latch
+    end
+
     test "ships with dry_run enabled", %{config: config} do
       # Deliberate. The first thing this daemon does against the real broker
       # should be to say what it would have done. Three of the rules it
@@ -354,6 +380,79 @@ defmodule Merlin.ConfigSourceTest do
 
       assert {:error, errors} = Config.File.validate(config)
       assert {:derived_missing_out, :p} in errors
+    end
+
+    test "a typo'd top-level key is refused, with a suggestion" do
+      # The silent-no-op defect, in the file that configures everything.
+      # `persits:` would disable persistence and fail nowhere.
+      config = %{groups: [], rules: [], sources: [], persits: [[:person]]}
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert {:unknown_key, :persits, :persist} in errors
+    end
+
+    test "an unknown key with no near match still names the known ones" do
+      config = %{groups: [], rules: [], sources: [], wombat: 1}
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert {:unknown_key, :wombat, nil} in errors
+      assert Config.File.format_errors(errors) =~ "Known keys:"
+    end
+
+    # The regression. @known_keys said `persist:` was legal and build/2 threw
+    # it away, so the config validated, the daemon started, and nothing was
+    # ever persisted. Nothing failed anywhere.
+    test "every known key survives into the loaded config" do
+      {:ok, built} = Config.File.validate(%{groups: [], rules: [], sources: []})
+
+      for key <- Config.File.known_keys() do
+        assert Map.has_key?(built, key),
+               "#{inspect(key)} is a known key but build/2 drops it -- setting it would do nothing"
+      end
+    end
+
+    test "a value set for a known key reaches the loaded config" do
+      {:ok, built} =
+        Config.File.validate(%{
+          groups: [],
+          rules: [],
+          sources: [],
+          persist: [[:person]],
+          settle_ms: 4321,
+          api: %{port: 9999}
+        })
+
+      assert built[:persist] == [[:person]]
+      assert built[:settle_ms] == 4321
+      assert built[:api] == %{port: 9999}
+    end
+
+    test "every key the shipped config uses is a known key", %{} do
+      # The inverse direction: the validator's list and the shipped file must
+      # agree, or one of them is out of date and the check is theatre.
+      {raw, _} = Code.eval_file(@config_path)
+
+      for key <- Map.keys(raw) do
+        assert key in Config.File.known_keys(),
+               "the shipped config uses #{inspect(key)}, which the validator does not know"
+      end
+    end
+
+    test "a persist entry that is not a path is refused" do
+      for bad <- [[:person, "x"], [], "person", :person] do
+        config = %{groups: [], rules: [], sources: [], persist: [bad]}
+
+        assert {:error, errors} = Config.File.validate(config)
+
+        assert Enum.any?(errors, &match?({:bad_persist_prefix, ^bad}, &1)),
+               "persist: #{inspect(bad)} was accepted"
+      end
+    end
+
+    test "persist must be a list" do
+      config = %{groups: [], rules: [], sources: [], persist: %{a: 1}}
+      assert {:error, errors} = Config.File.validate(config)
+      assert Enum.any?(errors, &match?({:persist_not_a_list, _}, &1))
     end
 
     test "a missing file is an error, not an empty config" do

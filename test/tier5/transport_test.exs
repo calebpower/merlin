@@ -518,4 +518,91 @@ defmodule Merlin.TransportTest do
              "the client secret appeared in a failure log"
     end
   end
+
+  describe "the settle window covers adapters, not only rules" do
+    # Adapters reach the broker through Merlin.MQTT.Connection directly,
+    # bypassing Merlin.Effects entirely -- so the settle window has to be
+    # applied in both places or it has a hole exactly the width of every
+    # adapter.
+    #
+    # Nothing in the shipped configuration emits a publish from an adapter
+    # today: the ping/pong harness is a declarative source plus a rule, and
+    # `Merlin.Adapters.Echo` is used by nothing but its own unit test. So a
+    # mutation deleting this guard survived the whole battery, because the
+    # guarded path is unreachable from the config.
+    #
+    # It is still a real guard: `{:publish, topic, payload, opts}` is part of
+    # the documented adapter contract, and the next adapter to use it should
+    # not have to rediscover that retained-message replay exists. Testing it
+    # directly is the difference between a defence and a hope.
+    setup do
+      Merlin.Settle.finish()
+      on_exit(&Merlin.Settle.finish/0)
+      :ok
+    end
+
+    defp start_connection do
+      {:ok, pid} =
+        GenServer.start_link(
+          Merlin.MQTT.Connection,
+          [
+            client: Merlin.Test.FakeBroker,
+            adapters: [{Merlin.Adapters.Echo, []}],
+            client_id: "settle-adapter-test",
+            host: "fake",
+            port: 0
+          ],
+          name: Merlin.MQTT.Connection
+        )
+
+      broker = Process.whereis(Merlin.Test.FakeBroker)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.unlink(pid)
+          Process.exit(pid, :kill)
+        end
+      end)
+
+      {pid, broker}
+    end
+
+    defp sync(pid) do
+      :sys.get_state(pid, 1_000)
+      Process.sleep(20)
+      :sys.get_state(pid, 1_000)
+    end
+
+    test "an adapter's publish is held while settling" do
+      {pid, broker} = start_connection()
+
+      Merlin.Settle.begin("test", 10_000)
+      Merlin.Test.FakeBroker.connect(broker)
+      sync(pid)
+      Merlin.Test.FakeBroker.clear_published(broker)
+
+      Merlin.Test.FakeBroker.device_publish(broker, "test/ping", "hello")
+      sync(pid)
+
+      assert Merlin.Test.FakeBroker.published(broker) == [],
+             "an adapter published during the settle window"
+    end
+
+    test "and goes through once the window closes" do
+      {pid, broker} = start_connection()
+
+      Merlin.Settle.begin("test", 10_000)
+      Merlin.Test.FakeBroker.connect(broker)
+      sync(pid)
+      Merlin.Test.FakeBroker.clear_published(broker)
+
+      # The other half of the assertion. A window that never reopened would
+      # satisfy the test above perfectly.
+      Merlin.Settle.finish()
+      Merlin.Test.FakeBroker.device_publish(broker, "test/ping", "hello")
+      sync(pid)
+
+      assert [{"test/pong", "pong"}] = Merlin.Test.FakeBroker.published(broker)
+    end
+  end
 end

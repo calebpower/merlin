@@ -45,7 +45,8 @@ defmodule Merlin.Derive.Geofence do
     :out_position_path,
     :stale_after_ms,
     :accuracy_path,
-    :max_accuracy_m
+    :max_accuracy_m,
+    recheck_armed?: false
   ]
 
   @doc false
@@ -69,17 +70,32 @@ defmodule Merlin.Derive.Geofence do
     Merlin.Bus.subscribe(state.lat_path)
     Merlin.Bus.subscribe(state.lon_path)
 
+    # The accuracy fact too, which it never did.
+    #
+    # Without this the accuracy gate was permanently one message behind: a
+    # message's coordinates triggered a recompute while the accuracy fact still
+    # held the PREVIOUS fix's value, and the accuracy arriving triggered
+    # nothing at all. So `max_accuracy_m: 100` judged every fix by the accuracy
+    # of the one before it, and a 500m fix was placed in a zone as confidently
+    # as a 5m one. The moduledoc's claim that a vague fix "is not evidence of
+    # being anywhere in particular" was simply not implemented.
+    if state.accuracy_path, do: Merlin.Bus.subscribe(state.accuracy_path)
+
     # Compute once at start so a restart does not leave the zone stale until
     # the next fix arrives.
-    recompute(state)
+    state = recompute(state)
 
     {:ok, state}
   end
 
   @impl true
   def handle_info({:merlin, %Merlin.Change{}}, state) do
-    recompute(state)
-    {:noreply, state}
+    {:noreply, recompute(state, arm_recheck: true)}
+  end
+
+  # The deferred second look. See `@recheck_ms`.
+  def handle_info(:recheck, state) do
+    {:noreply, recompute(%{state | recheck_armed?: false}, arm_recheck: false)}
   end
 
   def handle_info(_other, state), do: {:noreply, state}
@@ -94,10 +110,49 @@ defmodule Merlin.Derive.Geofence do
           atom() | :unknown
   def compute(point, previous, zones), do: Zones.resolve(point, previous, zones)
 
-  defp recompute(state) do
-    previous = World.get(state.out_path, :unknown)
-    point = read_point(state)
+  # A message's last fact write does not reliably produce a change.
+  #
+  # `World.put/3` notifies on change only, and a phone that reports a constant
+  # nominal accuracy -- most of them -- writes the same value every time. So
+  # the sequence is: lat changes (partial, hold), lon changes (partial, hold),
+  # accuracy written but IDENTICAL, no notification, no third recompute. The
+  # zone then freezes until a fix happens to arrive with a different accuracy.
+  #
+  # This is a failure the contemporaneity fix introduced, and the tests for
+  # that fix are what caught it. So: an incoherent read arms one deferred
+  # recheck. By the time it fires the rest of the message has landed and the
+  # components agree. It does not re-arm itself, so a genuinely partial
+  # observation holds once and stops rather than spinning.
+  @recheck_ms 50
 
+  defp recompute(state, opts \\ []) do
+    previous = World.get(state.out_path, :unknown)
+
+    case read_point(state) do
+      :incoherent ->
+        # HOLD. Not `:unknown` -- writing that would itself be an edge, and
+        # `{:leaves, zone, :home}` fires on it just as readily as a real
+        # departure would. The whole defect here is edges that describe
+        # nothing that happened.
+        #
+        # Debug, not info: this is the NORMAL path for the first writes of
+        # every message, so at any louder level it would be pure noise.
+        Logger.debug(fn -> "#{state.id}: partial observation, holding" end)
+
+        if Keyword.get(opts, :arm_recheck, false) and not state.recheck_armed? do
+          Process.send_after(self(), :recheck, @recheck_ms)
+          %{state | recheck_armed?: true}
+        else
+          state
+        end
+
+      point ->
+        do_recompute(state, previous, point)
+        state
+    end
+  end
+
+  defp do_recompute(state, previous, point) do
     zone = Zones.resolve(point, previous, Zones.all())
 
     if zone != previous do
@@ -114,18 +169,87 @@ defmodule Merlin.Derive.Geofence do
     end
   end
 
-  # A position is only usable if both components are present, fresh, and -- if
-  # an accuracy fact is configured -- accurate enough. Any of those failing
-  # yields :unknown rather than a confident wrong zone.
+  # How far apart two components of one observation may be observed and still
+  # be treated as describing the same moment.
+  #
+  # The assumption, stated so it can be checked: one message's fact writes
+  # complete within this window, and two distinct observations are further
+  # apart than it. Both hold by orders of magnitude -- three consecutive calls
+  # to one writer doing ETS inserts take well under a millisecond, and a phone
+  # reports every thirty seconds.
+  #
+  # Where it fails is two genuine observations less than 250ms apart, whose
+  # components could still be crossed. That is a duplicate message in practice,
+  # where the chimera equals the truth and nothing is harmed.
+  @coherence_ms 250
+
+  # A position is only usable if its components are present, fresh, accurate
+  # enough, and -- the part this did not check -- **contemporaneous**.
+  #
+  # One phone message becomes three fact writes: lat, lon, accuracy. Between
+  # them the world holds a position that never existed: a new latitude beside
+  # the previous longitude, or new coordinates beside a stale accuracy. The
+  # geofence recomputed on each of those, and every intermediate result is an
+  # edge that edge-triggered rules act on.
+  #
+  # Tier 9 caught it as the intruder latch re-arming: a phone arriving home
+  # with a 120m fix briefly read `:home` using the PREVIOUS accuracy, which
+  # matched `{:enters, zone, :home}`, and only then did the accuracy fact land
+  # and drop the zone to `:unknown`. The same phantom can turn the lamps on for
+  # an arrival that did not happen, and it occurs on every single update -- it
+  # is merely invisible when the chimera lands in the same zone as the truth.
+  #
+  # Contemporaneity is checkable because an unchanged write still refreshes
+  # `observed_at`. A device re-reporting an identical longitude therefore keeps
+  # the pair coherent, which is that decision paying for itself somewhere it
+  # was not designed for.
+  #
+  # The trade-off, stated: a device that DECLARES an accuracy fact and then
+  # stops sending it freezes its zone, because the fix can no longer be
+  # verified. That is deliberate and it is the safer direction -- the
+  # alternative is placing someone using a fix of unknown quality, which is the
+  # defect above wearing a different hat. It is also visible: the zone simply
+  # stops changing, and the debug line below says why. A device that never
+  # reports accuracy at all is unaffected, since there is no fact to be
+  # incoherent with.
   defp read_point(state) do
-    with {:ok, lat} <- fresh_value(state.lat_path, state.stale_after_ms),
-         {:ok, lon} <- fresh_value(state.lon_path, state.stale_after_ms),
+    with {:ok, lat, lat_at} <- fresh_value(state.lat_path, state.stale_after_ms),
+         {:ok, lon, lon_at} <- fresh_value(state.lon_path, state.stale_after_ms),
+         :ok <- coherent?([lat_at, lon_at | accuracy_observed_at(state)]),
          :ok <- accurate_enough(state) do
       {lat, lon}
     else
+      :incoherent -> :incoherent
       _ -> :unknown
     end
   end
+
+  defp coherent?(stamps) do
+    if Enum.max(stamps) - Enum.min(stamps) <= @coherence_ms, do: :ok, else: :incoherent
+  end
+
+  defp accuracy_observed_at(%{accuracy_path: nil}), do: []
+
+  defp accuracy_observed_at(state) do
+    case World.fetch(state.accuracy_path) do
+      {:ok, %Fact{observed_at: at}} -> [at]
+      :error -> []
+    end
+  end
+
+  @doc "How far apart an observation's components may be and still be paired."
+  @spec coherence_ms() :: pos_integer()
+  def coherence_ms, do: @coherence_ms
+
+  @doc """
+  How long after a partial observation the deferred recheck runs.
+
+  Exposed so a test can wait for it deterministically rather than guessing.
+  A test that sleeps less than this asserts on a zone that was still going to
+  change, which is a flake that looks exactly like a bug.
+  """
+  @spec recheck_ms() :: pos_integer()
+  def recheck_ms, do: @recheck_ms
 
   defp fresh_value(path, stale_after_ms) do
     case World.fetch(path) do
@@ -133,7 +257,7 @@ defmodule Merlin.Derive.Geofence do
         cond do
           Fact.stale?(fact) -> :stale
           is_integer(stale_after_ms) and Fact.age(fact) > stale_after_ms -> :stale
-          true -> {:ok, value}
+          true -> {:ok, value, fact.observed_at}
         end
 
       _ ->

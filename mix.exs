@@ -12,9 +12,35 @@ defmodule Merlin.MixProject do
       deps: deps(),
       releases: releases(),
       elixirc_options: [warnings_as_errors: true],
-      test_paths: ["test"]
+      elixirc_paths: elixirc_paths(Mix.env()),
+      test_paths: ["test"],
+      dialyzer: dialyzer()
     ]
   end
+
+  # The PLT is minutes to build and seconds to reuse, so it lives on the reaper
+  # pool with the other caches rather than on the guest's root disk -- which
+  # has ~3.3 GiB free and would not survive it.
+  defp dialyzer do
+    cache = System.get_env("REAPER_CACHE_BUILD") || "_build"
+
+    [
+      plt_local_path: Path.join(cache, "plt"),
+      plt_core_path: Path.join(cache, "plt"),
+      # The test tree is checked too. test/support is ordinary code that the
+      # simulated house depends on, and a shadow model with a type error is a
+      # shadow model that is wrong about the thing it exists to check.
+      plt_add_apps: [:mix, :ex_unit],
+      flags: [:error_handling, :unknown]
+    ]
+  end
+
+  # Tier 9's simulated house needs a fake broker and a shadow model, and they
+  # are ordinary modules rather than something defined inside a test file --
+  # the shadow model in particular has to be readable on its own, because a
+  # shadow nobody can read is just a second implementation of the same bug.
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   def application do
     [
@@ -57,7 +83,7 @@ defmodule Merlin.MixProject do
 
       {:mox, "~> 1.2", only: :test},
       {:stream_data, "~> 1.1", only: :test},
-      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 

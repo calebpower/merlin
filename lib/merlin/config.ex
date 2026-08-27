@@ -135,6 +135,45 @@ defmodule Merlin.Config do
   def rules, do: loaded()[:rules] || []
 
   @doc """
+  Path prefixes whose facts survive a restart.
+
+  Two sources, unioned:
+
+    * the top-level `persist:` list, for facts that are not a rule's -- the
+      A/C's desired setting, say, or a presence fact you want to survive a
+      `pkg upgrade`; and
+    * every machine declaring `persist: true`, which contributes `[:rule, id]`
+      and so covers both its state and its data slots.
+
+  A machine says `persist: true` next to its states, where the decision is
+  legible, rather than requiring you to also remember to add a path to a list
+  somewhere else. Forgetting the second half would produce a latch that looks
+  persisted and is not, and would not fail anywhere.
+  """
+  @spec persisted_prefixes() :: [Merlin.Path.t()]
+  def persisted_prefixes, do: persisted_prefixes(loaded())
+
+  @doc """
+  As `persisted_prefixes/0`, for a config that is not the installed one.
+
+  Takes the config rather than reading the global so tier 3 can ask the
+  question of the shipped file directly. A function that can only be asked
+  about whatever happens to be installed is a function that gets tested by
+  installing things, which is how test suites acquire order dependencies.
+  """
+  @spec persisted_prefixes(map()) :: [Merlin.Path.t()]
+  def persisted_prefixes(config) when is_map(config) do
+    declared = config[:persist] || []
+
+    from_machines =
+      (config[:rules] || [])
+      |> Enum.filter(&match?(%Merlin.Machine{persist: true}, &1))
+      |> Enum.map(&[:rule, &1.id])
+
+    Enum.uniq(declared ++ from_machines)
+  end
+
+  @doc """
   Adapters to run, derived from the sources.
 
   One adapter instance per source, so the router resolves a message straight to

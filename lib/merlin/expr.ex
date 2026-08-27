@@ -189,7 +189,17 @@ defmodule Merlin.Expr do
   # Dotted paths: fact reads and scoped reads.
   defp check({{:., _, [_, _]}, _, []} = dotted) do
     case path_segments(dotted) do
-      {:ok, [root | rest]} when root in @scoped_roots -> {:ok, {:scoped, root, rest}}
+      # Exactly one key. `local.a.b` and `trigger.x.y` have no meaning, and
+      # the old handling built a closure that raised when the rule ran --
+      # so a typo in a guard became a rule that was silently skipped forever,
+      # logged once per event, instead of a config error at boot. Dialyzer
+      # found it by noticing the closure could only ever throw.
+      {:ok, [root, key]} when root in @scoped_roots ->
+        {:ok, {:scoped, root, key}}
+
+      {:ok, [root | rest]} when root in @scoped_roots ->
+        {:error, {:bad_scoped_read, "#{root}.#{Enum.join(rest, ".")}"}}
+
       {:ok, segments} -> {:ok, {:fact, segments}}
       :error -> {:error, {:forbidden_syntax, Macro.to_string(dotted)}}
     end
@@ -245,19 +255,15 @@ defmodule Merlin.Expr do
 
   defp build({:fact, segments}), do: fn env -> env.read.(segments) end
 
-  defp build({:scoped, :local, [key]}), do: fn env -> Map.get(env.locals, key, :unknown) end
+  defp build({:scoped, :local, key}), do: fn env -> Map.get(env.locals, key, :unknown) end
 
-  defp build({:scoped, :trigger, [key]}) do
+  defp build({:scoped, :trigger, key}) do
     fn env ->
       case Map.fetch(env.trigger, key) do
         {:ok, value} -> value
         :error -> Map.get(env.trigger[:captures] || %{}, Atom.to_string(key), :unknown)
       end
     end
-  end
-
-  defp build({:scoped, root, rest}) do
-    fn _env -> raise ArgumentError, "bad scoped read #{root}.#{Enum.join(rest, ".")}" end
   end
 
   # Short-circuiting, three-valued.

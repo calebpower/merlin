@@ -25,11 +25,37 @@ failed=0
 note() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$LEDGER"; }
 
 # tier <n> <name> <command...>
+# Each tier's own output goes to its log, which means the connection sees
+# nothing at all while a tier runs. reaper's io_timeout is measured in SILENCE,
+# so a tier that legitimately takes several minutes -- tier 9 shrinking a
+# failing trace re-runs whole houses -- is indistinguishable from a wedged
+# session, and the run is killed with its results thrown away.
+#
+# So: a heartbeat. It says nothing useful except "still alive", which is
+# exactly the thing that was missing.
 tier() {
     n=$1; shift
     name=$1; shift
     say "tier $n: $name"
-    if "$@" > "$REAPER_OUT/tier-$n.log" 2>&1; then
+
+    "$@" > "$REAPER_OUT/tier-$n.log" 2>&1 &
+    cmd_pid=$!
+
+    (
+        while kill -0 "$cmd_pid" 2>/dev/null; do
+            sleep 30
+            kill -0 "$cmd_pid" 2>/dev/null && \
+                printf '    tier %s still running (%ss)\n' "$n" "$SECONDS"
+        done
+    ) &
+    hb_pid=$!
+
+    status=0
+    wait "$cmd_pid" || status=$?
+    kill "$hb_pid" 2>/dev/null || true
+    wait "$hb_pid" 2>/dev/null || true
+
+    if [ "$status" -eq 0 ]; then
         note "$n" "pass" "$name"
         say "tier $n: pass"
     else
@@ -80,7 +106,9 @@ tier 5 "daemon vs fakes" mix test --only tier5 --warnings-as-errors
 tier 6 "full stack (smoke)" sh reaper/smoke.sh
 tier 7 "seeded fuzzing" mix test --only tier7 --warnings-as-errors
 tier 8 "concurrency" mix test --only tier8 --warnings-as-errors
-skip 9 "simulated house"    "lands at M7; needs persistence and the settle period"
+# The seed is printed by the tier itself and captured in its log, so a failure
+# replays. MERLIN_SIM_SEED pins it.
+tier 9 "simulated house" mix test --only tier9 --warnings-as-errors
 
 skip 10 "live browser audit" "deferred to M9"
 skip 11 "human evidence"     "not applicable -- single maintainer, no first-timer to observe"

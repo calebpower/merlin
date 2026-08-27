@@ -24,6 +24,14 @@ defmodule Merlin.Codec do
           | {:enum, %{optional(binary()) => term()}}
           | {:json_path, [binary()], spec()}
           | {:truthy, term(), term()}
+          # Internal, and declared rather than hidden. `{:enum, _}` maps a wire
+          # PAYLOAD through a table; this maps an already-decoded VALUE through
+          # the same table, which is what a JSON body's field needs. It is
+          # produced by apply_inner/2 and consumed by decode/2, and leaving it
+          # out of the type did not make it any less real -- it only meant
+          # dialyzer reported a call that was correct as one that could never
+          # succeed.
+          | {:enum_value, %{optional(binary()) => term()}}
 
   @doc """
   Decode `payload` according to `spec`.
@@ -31,7 +39,14 @@ defmodule Merlin.Codec do
   Specs compose: `{:json_path, ["print_stats", "state"], {:enum, ...}}` pulls a
   nested field out of a JSON body and then maps it.
   """
-  @spec decode(binary(), spec()) :: {:ok, term()} | :error
+  # `term()`, not `binary()`. The {:truthy, _, _} and {:enum_value, _} specs
+  # deliberately operate on already-decoded VALUES rather than on wire bytes --
+  # `truthy?/1` exists precisely to classify nil, 0, "" and [] -- so the narrow
+  # spec was a false claim about this function, and dialyzer reported the
+  # internal call as one that could not succeed. Widening it makes the
+  # contract true; narrowing the code instead would break enum mapping over
+  # any non-binary payload.
+  @spec decode(term(), spec()) :: {:ok, term()} | :error
   def decode(payload, :raw) when is_binary(payload), do: {:ok, payload}
 
   def decode(payload, :json) when is_binary(payload) do
