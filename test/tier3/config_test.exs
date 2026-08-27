@@ -36,7 +36,7 @@ defmodule Merlin.ConfigSourceTest do
   defp watches_any?(%Merlin.Machine{} = m), do: m.watches != [] or m.watch_events != []
 
   # The real file, not a fixture.
-  @config_path Path.expand("../../priv/merlin.exs", __DIR__)
+  @config_path Path.expand("../../priv/example.exs", __DIR__)
 
   # The shipped config references secrets it does not contain -- that is the
   # point of the split. These placeholders let the structural assertions run;
@@ -245,23 +245,34 @@ defmodule Merlin.ConfigSourceTest do
       end
     end
 
-    test "the zones are the real house, not invented ones", %{config: config} do
-      # Guarding against the specific way this went wrong: coordinates that
-      # look plausible and are in the wrong state entirely. Massachusetts, not
-      # Tennessee. Every presence rule would have read :unknown for ever.
+    test "the example's zones are coherent with each other", %{config: config} do
+      # The real house's config had coordinates in the wrong STATE -- plausible
+      # numbers, hundreds of miles from anything -- and every presence rule
+      # read :unknown for ever without a word of complaint.
+      #
+      # A shipped example cannot assert "near the house" because it has no
+      # house. It can assert the property that actually broke: the zones must
+      # be near ONE ANOTHER, on the scale a person travels between them. Two
+      # zones a thousand miles apart are a copy-paste accident, and so is a
+      # zone at {0, 0}.
       zones = config.zones
+      assert map_size(zones) >= 2, "the example should show more than one zone"
 
-      assert Map.has_key?(zones, :home), "no home zone"
-      assert Map.has_key?(zones, :workshop), "no hackspace zone"
+      centres = Enum.map(zones, fn {_id, z} -> z.center end)
 
-      for {id, zone} <- zones do
-        {lat, lon} = zone.center
+      for {lat, lon} <- centres do
+        refute {lat, lon} == {0.0, 0.0}, "a zone sits at null island"
+        assert lat >= -90.0 and lat <= 90.0, "latitude #{lat} is not a latitude"
+        assert lon >= -180.0 and lon <= 180.0, "longitude #{lon} is not a longitude"
+      end
 
-        assert lat > 42.0 and lat < 43.0,
-               "zone #{id} has latitude #{lat}, which is not near this house"
+      for a <- centres, b <- centres, a != b do
+        km = Merlin.Geo.distance(a, b) / 1000
 
-        assert lon > -71.5 and lon < -70.5,
-               "zone #{id} has longitude #{lon}, which is not near this house"
+        assert km < 200,
+               "two zones are #{round(km)} km apart, which is not a house and the places " <>
+                 "its occupant goes -- the likeliest cause is coordinates copied from " <>
+                 "somewhere else entirely"
       end
     end
 
@@ -316,7 +327,7 @@ defmodule Merlin.ConfigSourceTest do
 
       for guard <- guards do
         for zone <- [:unknown, nil] do
-          refute Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :cal, :zone] => zone}))),
+          refute Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :owner, :zone] => zone}))),
                  "a door moving with the phone at #{inspect(zone)} would raise an intruder alert"
         end
       end
@@ -329,11 +340,11 @@ defmodule Merlin.ConfigSourceTest do
       [guard] = guards_of(latch, :armed)
 
       for zone <- [:away, :workshop] do
-        assert Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :cal, :zone] => zone}))),
+        assert Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :owner, :zone] => zone}))),
                "a door moving while at #{inspect(zone)} would NOT alert"
       end
 
-      refute Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :cal, :zone] => :home}))),
+      refute Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :owner, :zone] => :home}))),
              "a door moving while home would alert"
     end
 
@@ -350,7 +361,7 @@ defmodule Merlin.ConfigSourceTest do
 
       dark =
         env_with(%{
-          [:person, :cal, :zone] => :home,
+          [:person, :owner, :zone] => :home,
           [:vehicle, :car, :zone] => :unknown
         })
 
@@ -360,7 +371,7 @@ defmodule Merlin.ConfigSourceTest do
       # And it still answers plainly when it can see the car.
       seen =
         env_with(%{
-          [:person, :cal, :zone] => :home,
+          [:person, :owner, :zone] => :home,
           [:vehicle, :car, :zone] => :away
         })
 
@@ -368,7 +379,7 @@ defmodule Merlin.ConfigSourceTest do
 
       home =
         env_with(%{
-          [:person, :cal, :zone] => :home,
+          [:person, :owner, :zone] => :home,
           [:vehicle, :car, :zone] => :home
         })
 
@@ -399,7 +410,7 @@ defmodule Merlin.ConfigSourceTest do
 
         env =
           env_with(%{
-            [:person, :cal, :zone] => :home,
+            [:person, :owner, :zone] => :home,
             [:vehicle, :car, :zone] => :unknown,
             [:vehicle, :car, :with_phone?] => false
           })
@@ -644,7 +655,7 @@ defmodule Merlin.ConfigSourceTest do
             id: :bad,
             desc: "d",
             on: [{:changes, [:x]}],
-            when: "person.cal.zone == :work",
+            when: "person.owner.zone == :work",
             do: [{:log, :info, "x"}]
           }
         ]
@@ -665,7 +676,7 @@ defmodule Merlin.ConfigSourceTest do
             id: :ok_rule,
             desc: "d",
             on: [{:changes, [:x]}],
-            when: "person.cal.zone == :home",
+            when: "person.owner.zone == :home",
             do: [{:log, :info, "x"}]
           }
         ]
@@ -687,7 +698,7 @@ defmodule Merlin.ConfigSourceTest do
             id: :ok_rule,
             desc: "d",
             on: [{:changes, [:x]}],
-            when: "person.cal.zone != :unknown",
+            when: "person.owner.zone != :unknown",
             do: [{:log, :info, "x"}]
           }
         ]
@@ -713,7 +724,7 @@ defmodule Merlin.ConfigSourceTest do
             id: :ok_rule,
             desc: "d",
             on: [{:changes, [:x]}],
-            when: "person.cal.zone == :away",
+            when: "person.owner.zone == :away",
             do: [{:log, :info, "x"}]
           }
         ]
@@ -736,7 +747,7 @@ defmodule Merlin.ConfigSourceTest do
             machine: %{
               initial: :a,
               states: %{
-                a: [%{on: {:changes, [:x]}, when: "person.cal.zone == :gym", goto: :a}]
+                a: [%{on: {:changes, [:x]}, when: "person.owner.zone == :gym", goto: :a}]
               }
             }
           }
@@ -757,7 +768,7 @@ defmodule Merlin.ConfigSourceTest do
             id: :bad_list,
             desc: "d",
             on: [{:changes, [:x]}],
-            when: "person.cal.zone in [:home, :atlantis]",
+            when: "person.owner.zone in [:home, :atlantis]",
             do: [{:log, :info, "x"}]
           }
         ]

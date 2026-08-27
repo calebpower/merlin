@@ -117,7 +117,7 @@ defmodule Merlin.PreflightTest do
         zones: [%{id: :home, center: {42.0, -71.0}, radius: {0.25, :mi}}],
         groups: [],
         sources: [],
-        rules: [%{id: :r, desc: "d", on: [{:changes, [:x]}], when: "person.cal.zone == :work", do: [{:log, :info, "x"}]}]
+        rules: [%{id: :r, desc: "d", on: [{:changes, [:x]}], when: "person.owner.zone == :work", do: [{:log, :info, "x"}]}]
       }|)
 
       assert {:error, "config", why} = check("config")

@@ -2,7 +2,7 @@ defmodule Merlin.Expr do
   @moduledoc """
   The bounded expression language that rule data is written in.
 
-      "person.cal.zone == :home and vehicle.car.zone != :home"
+      "person.owner.zone == :home and vehicle.car.zone != :home"
 
   ## How it works, and what it deliberately is not
 
@@ -283,7 +283,7 @@ defmodule Merlin.Expr do
   @doc """
   Atoms this expression compares a `.zone` fact against.
 
-  For the boot validator. A guard reading `person.cal.zone == :work` in a
+  For the boot validator. A guard reading `person.owner.zone == :work` in a
   house that declares no `:work` zone is not an error anywhere -- it compiles,
   it loads, and it is simply never true. The rule then does nothing, for ever,
   silently, and the house looks quiet rather than broken.

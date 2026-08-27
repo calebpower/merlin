@@ -29,8 +29,8 @@ mkdir -p "$MERLIN_STATE_DIR/tmp"
 # guest. Point it at the config bundled in the release's own priv, which is
 # what a deployment does too: supply the path explicitly rather than relying
 # on a fallback.
-MERLIN_CONFIG=$(ls "$REL"/lib/merlin-*/priv/merlin.exs 2>/dev/null | head -1)
-[ -n "$MERLIN_CONFIG" ] || die "no merlin.exs bundled in the release under $REL/lib/merlin-*/priv/"
+MERLIN_CONFIG=$(ls "$REL"/lib/merlin-*/priv/example.exs 2>/dev/null | head -1)
+[ -n "$MERLIN_CONFIG" ] || die "no example.exs bundled in the release under $REL/lib/merlin-*/priv/"
 export MERLIN_CONFIG
 say "config: $MERLIN_CONFIG"
 
@@ -417,14 +417,14 @@ say "snitch response: $(cat "$snitch_out")"
 i=0
 while [ "$i" -lt 20 ]; do
     lat=$("$REL/bin/merlin" rpc \
-        'IO.puts(inspect(Merlin.World.get([:person, :cal, :lat])))' 2>>"$rpc_err" | tail -1)
+        'IO.puts(inspect(Merlin.World.get([:person, :owner, :lat])))' 2>>"$rpc_err" | tail -1)
     [ "$lat" != "nil" ] && break
     i=$((i + 1))
     sleep 0.2
 done
 
 case "$lat" in
-    *51.4779*) say "/snitch with a live-minted key produced person.cal.lat = $lat" ;;
+    *51.4779*) say "/snitch with a live-minted key produced person.owner.lat = $lat" ;;
     *) tail -20 "$rpc_err" 2>/dev/null; die "the key did not inject a fact (lat=$lat)" ;;
 esac
 
@@ -458,7 +458,7 @@ post_position() {
 
 zone_now() {
     "$REL/bin/merlin" rpc \
-        'IO.puts(inspect(Merlin.World.get([:person, :cal, :zone])))' 2>>"$rpc_err" | tail -1
+        'IO.puts(inspect(Merlin.World.get([:person, :owner, :zone])))' 2>>"$rpc_err" | tail -1
 }
 
 await_zone() {

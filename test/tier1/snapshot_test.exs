@@ -90,7 +90,7 @@ defmodule Merlin.SnapshotTest do
     end
 
     test "stale_after survives" do
-      {[restored], []} = round_trip([fact([:person, :cal, :lat], 35.9, stale_after: 30_000)])
+      {[restored], []} = round_trip([fact([:person, :owner, :lat], 35.9, stale_after: 30_000)])
       assert restored.stale_after == 30_000
     end
 
@@ -150,7 +150,7 @@ defmodule Merlin.SnapshotTest do
       two_days = 2 * 24 * 60 * 60 * 1_000
 
       {[restored], []} =
-        round_trip([fact([:person, :cal, :lat], 35.9, now: 1_000_000, stale_after: 30_000)],
+        round_trip([fact([:person, :owner, :lat], 35.9, now: 1_000_000, stale_after: 30_000)],
           encode_mono: 1_000_000,
           now_mono: 5_000_000,
           snap_wall: 1_700_000_000_000,
@@ -233,10 +233,10 @@ defmodule Merlin.SnapshotTest do
     # each path once; a warning that repeats forever is wallpaper, and it
     # takes the warnings that matter down with it.
     test "what was skipped is returned, with its type, not logged" do
-      facts = [fact([:person, :cal, :position], {35.9, -83.9}), fact([:b], :fine)]
+      facts = [fact([:person, :owner, :position], {35.9, -83.9}), fact([:b], :fine)]
       {_binary, skipped} = Snapshot.encode(facts, 1_000, 1_000)
 
-      assert [{[:person, :cal, :position], "tuple"}] = skipped
+      assert [{[:person, :owner, :position], "tuple"}] = skipped
     end
 
     test "nothing skipped means an empty list, not nil" do
