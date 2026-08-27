@@ -1,0 +1,11 @@
+#!/bin/sh
+# Validate everything the daemon needs before it starts, and exit non-zero if
+# anything is wrong. Called by rc.d's start_precmd, and safe to run by hand
+# after editing config.
+#
+# `bin/merlin eval` boots a fresh BEAM with the release's code paths and its
+# applications loaded but not started, in a separate OS process -- so this
+# works whether or not the daemon is running.
+set -eu
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+exec "$SCRIPT_DIR/merlin" eval 'Merlin.Preflight.run!()'

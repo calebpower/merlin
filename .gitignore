@@ -34,3 +34,19 @@ core
 
 # project
 config.toml
+# elixir / erlang
+/_build/
+/deps/
+/cover/
+/doc/
+/.fetch
+erl_crash.dump
+*.ez
+merlin-*.tar
+/.elixir_ls/
+
+# reaper: results are pulled back into out/ and are never committed
+/out/
+
+# secrets: the real config and the secrets file never enter the repo
+/config/merlin.secrets.exs
