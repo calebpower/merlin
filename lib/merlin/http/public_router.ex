@@ -47,6 +47,7 @@ defmodule Merlin.HTTP.PublicRouter do
     conn =
       if Merlin.HTTP.RateLimit.allow?(conn.remote_ip) do
         {conn, body} = read_capped(conn)
+        trace(conn, body)
         handle_snitch(body, api_key_header(conn), conn)
         conn
       else
@@ -186,6 +187,52 @@ defmodule Merlin.HTTP.PublicRouter do
       Logger.warning("snitch handler raised: #{Exception.message(e)}")
       :ok
   end
+
+  # Every request, whatever the outcome -- for pointing a device at merlin and
+  # watching what it actually sends, rather than inferring it from a rejection
+  # that only fires on some paths.
+  #
+  # Off unless asked for: on a soak this is a line per position report, and a
+  # log nobody can skim is a log nobody reads. `merlin_ex_trace=YES` in
+  # rc.conf, or MERLIN_SNITCH_TRACE=1.
+  #
+  # Names only, never values, exactly as the rejection path does -- a trace
+  # that leaked the credential would be a worse bug than the one it is helping
+  # to find.
+  defp trace(conn, body) do
+    if trace?() do
+      Logger.info(
+        "snitch trace: #{byte_size_of(body)} byte body with keys #{body_keys(body)}; " <>
+          "headers: #{header_names(conn)}; query: #{query_names(conn)}"
+      )
+    end
+
+    :ok
+  end
+
+  defp trace? do
+    case System.get_env("MERLIN_SNITCH_TRACE") do
+      nil -> false
+      "" -> false
+      "0" -> false
+      "no" -> false
+      "NO" -> false
+      _ -> true
+    end
+  end
+
+  defp byte_size_of(body) when is_binary(body), do: byte_size(body)
+  defp byte_size_of(other), do: inspect(other)
+
+  defp body_keys(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, map} when is_map(map) -> map |> Map.keys() |> Enum.sort() |> inspect()
+      {:ok, other} -> "(a #{type_name(other)}, not an object)"
+      {:error, _} -> "(not JSON)"
+    end
+  end
+
+  defp body_keys(other), do: inspect(other)
 
   # Names only. A header VALUE may be the credential; a header NAME never is.
   defp header_names(conn) do

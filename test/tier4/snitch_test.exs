@@ -453,6 +453,49 @@ defmodule Merlin.HTTP.SnitchTest do
       assert_receive {:injected, "http/mobile/ariia/state", _, _}
     end
 
+    test "tracing reports every request, names only, and only when enabled" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      System.put_env("MERLIN_SNITCH_TRACE", "1")
+
+      on_exit(fn ->
+        Logger.configure(level: previous)
+        System.delete_env("MERLIN_SNITCH_TRACE")
+      end)
+
+      log =
+        capture_log(fn ->
+          conn(:post, "/snitch?tok=secret-query-value", ~s({"gps_latitude":1.0,"batt_level":9}))
+          |> put_req_header("content-type", "application/json")
+          |> put_req_header("x-secret-header", "secret-header-value")
+          |> @router.call(@opts)
+        end)
+
+      assert log =~ "snitch trace:"
+      assert log =~ "gps_latitude"
+      assert log =~ "x-secret-header"
+      assert log =~ "tok"
+
+      refute log =~ "secret-header-value", "a header value reached the trace"
+      refute log =~ "secret-query-value", "a query value reached the trace"
+    end
+
+    test "tracing is silent when not enabled" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      System.delete_env("MERLIN_SNITCH_TRACE")
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        capture_log(fn ->
+          conn(:post, "/snitch", ~s({"a":1}))
+          |> put_req_header("content-type", "application/json")
+          |> @router.call(@opts)
+        end)
+
+      refute log =~ "snitch trace:"
+    end
+
     test "a rejection names query parameters, never their values" do
       previous = Logger.level()
       Logger.configure(level: :info)
