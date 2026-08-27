@@ -190,7 +190,10 @@ defmodule Merlin.Config do
   @spec path() :: binary()
   def path do
     env("MERLIN_CONFIG") || Application.get_env(:merlin, :config_path) ||
-      Path.join(:code.priv_dir(:merlin) |> to_string(), "merlin.exs")
+      # The bundled EXAMPLE, not a house. Production supplies MERLIN_CONFIG (or
+      # api.config_path); this fallback exists so the release is runnable out
+      # of the box and so `merlin-preflight` has something to validate.
+      Path.join(:code.priv_dir(:merlin) |> to_string(), "example.exs")
   end
 
   @doc """

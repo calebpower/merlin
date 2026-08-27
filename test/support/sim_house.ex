@@ -30,7 +30,7 @@ defmodule Merlin.Test.SimHouse do
 
   alias Merlin.Test.FakeBroker
 
-  @config_path "priv/merlin.exs"
+  @config_path "priv/example.exs"
 
   # Long enough for a retained burst to land inside it, short enough that a
   # hundred-step run does not spend a minute waiting.
