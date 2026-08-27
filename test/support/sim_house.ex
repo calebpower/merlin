@@ -230,10 +230,23 @@ defmodule Merlin.Test.SimHouse do
     |> Map.new(&{&1.path, &1.value})
   end
 
-  # Flush the delivery chain in order. When the last call returns, everything
-  # the event was going to cause has happened -- no sleeping, no guessing.
+  # Flush the delivery chain in order, then wait out the one thing that is
+  # genuinely asynchronous.
+  #
+  # The geofence arms a deferred recheck when an observation arrives in pieces,
+  # which is every observation. Returning before it fires means the timeline
+  # records a world that was still changing -- and an invariant reading a
+  # half-updated snapshot reports transitions that never happened, which is
+  # indistinguishable from finding a real defect and wastes the shrinker on
+  # a ghost.
+  #
+  # This is the only sleep in the harness and it is not a guess: the duration
+  # comes from the geofence itself.
   defp flush do
     call(Merlin.MQTT.Connection)
+    call(Merlin.World.Writer)
+    call(Merlin.Rules.Engine)
+    Process.sleep(Merlin.Derive.Geofence.recheck_ms() + 30)
     call(Merlin.World.Writer)
     call(Merlin.Rules.Engine)
 
