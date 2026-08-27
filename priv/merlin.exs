@@ -272,17 +272,30 @@
       # A tracker silent for twenty minutes is not evidence of the car being
       # anywhere. The Python froze the last position forever.
       stale_after_ms: 1_200_000,
+      # EVERY numeric field arrives as a JSON string -- "51.47765", "1", "0".
+      # Without a codec they land as binaries, and the geofence requires
+      # numbers, so vehicle.car.zone stayed :unknown for ever and every
+      # vehicle rule was inert. Found on the first live poll; a dry-run soak
+      # would have shown this as a car that was simply never anywhere.
+      #
+      # There is no `batteryPercentage` in this API's response. That field
+      # came from hapn_tracker.py rather than from the endpoint, so "all ten
+      # fields" was nine fields and an aspiration. The real response also
+      # carries cellId, imei, reportType, created and hoursOfOperation, none
+      # of which anything here needs yet.
       facts: [
-        %{path: [:vehicle, :car, :lat], from: ["latitude"]},
-        %{path: [:vehicle, :car, :lon], from: ["longitude"]},
+        %{path: [:vehicle, :car, :lat], from: ["latitude"], codec: :float},
+        %{path: [:vehicle, :car, :lon], from: ["longitude"], codec: :float},
+        %{path: [:vehicle, :car, :accuracy_m], from: ["gpsAccuracy"], codec: :float},
+        %{path: [:vehicle, :car, :heading_deg], from: ["azimuth"], codec: :float},
+        %{path: [:vehicle, :car, :odometer_mi], from: ["odoMileage"], codec: :float},
+        %{path: [:vehicle, :car, :speed_mph], from: ["speed"], codec: :float},
+        # Timestamps and prose stay as they arrive: "20260827072921" is not a
+        # number in any useful sense, and parsing it here would invent a
+        # timezone the API does not state.
         %{path: [:vehicle, :car, :fix_at], from: ["gpsUTCTime"]},
-        %{path: [:vehicle, :car, :accuracy_m], from: ["gpsAccuracy"]},
-        %{path: [:vehicle, :car, :battery_pct], from: ["batteryPercentage"]},
         %{path: [:vehicle, :car, :reported_at], from: ["sendTime"]},
-        %{path: [:vehicle, :car, :address], from: ["address"]},
-        %{path: [:vehicle, :car, :heading_deg], from: ["azimuth"]},
-        %{path: [:vehicle, :car, :odometer_mi], from: ["odoMileage"]},
-        %{path: [:vehicle, :car, :speed_mph], from: ["speed"]}
+        %{path: [:vehicle, :car, :address], from: ["address"]}
       ]
     },
 

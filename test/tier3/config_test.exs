@@ -159,29 +159,66 @@ defmodule Merlin.ConfigSourceTest do
       end
     end
 
-    test "the vehicle poller declares all ten HAPN fields", %{config: config} do
-      # The Python captured ten and read three. Seven fields were fetched
-      # every two minutes and discarded, which is why the vehicle rule you
-      # wanted could not be written: the data was arriving already.
+    test "the vehicle poller declares every field the endpoint actually returns", %{
+      config: config
+    } do
+      # Nine, not ten. `batteryPercentage` came from hapn_tracker.py and is not
+      # in the API's response at all -- the field list was read from the code
+      # rather than from the endpoint.
       hapn = Enum.find(config.derived, &(&1.id == :hapn))
       assert hapn, "the vehicle poller is missing"
 
       assert {:ok, paths} = Config.File.produced_paths(hapn)
-      assert length(paths) == 10
 
       for leaf <- [
             :lat,
             :lon,
-            :fix_at,
             :accuracy_m,
-            :battery_pct,
-            :reported_at,
-            :address,
             :heading_deg,
             :odometer_mi,
-            :speed_mph
+            :speed_mph,
+            :fix_at,
+            :reported_at,
+            :address
           ] do
         assert [:vehicle, :car, leaf] in paths, "vehicle.car.#{leaf} is not declared"
+      end
+    end
+
+    # The defect that made the whole vehicle half inert: HAPN sends every
+    # number as a JSON string, the geofence requires numbers, so the zone was
+    # permanently :unknown and no vehicle rule could ever fire.
+    test "every field the geofence needs is decoded to a number", %{config: config} do
+      hapn = Enum.find(config.derived, &(&1.id == :hapn))
+
+      numeric = [:lat, :lon, :accuracy_m, :heading_deg, :odometer_mi, :speed_mph]
+
+      for leaf <- numeric do
+        spec = Enum.find(hapn.facts, &(&1.path == [:vehicle, :car, leaf]))
+        assert spec, "vehicle.car.#{leaf} is not declared"
+
+        assert Map.get(spec, :codec) in [:float, :integer],
+               "vehicle.car.#{leaf} has no numeric codec, so it would land as a string " <>
+                 "and the geofence would never resolve a zone"
+      end
+    end
+
+    test "a geofence's coordinate sources are all numerically decoded", %{config: config} do
+      # Generalised: for any geofence, whatever produces its lat and lon must
+      # decode to a number. Otherwise the fence silently never resolves.
+      producers =
+        for d <- config.derived,
+            Map.get(d, :kind) == :http_poll,
+            f <- Map.get(d, :facts, []),
+            into: %{},
+            do: {f.path, Map.get(f, :codec)}
+
+      for d <- config.derived, Map.get(d, :kind) == :geofence do
+        for path <- [d.lat, d.lon], Map.has_key?(producers, path) do
+          assert producers[path] in [:float, :integer],
+                 "#{d.id} reads #{Merlin.Path.to_string(path)}, which is produced without a " <>
+                   "numeric codec -- the fence would never resolve"
+        end
       end
     end
 
