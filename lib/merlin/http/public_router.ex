@@ -47,7 +47,7 @@ defmodule Merlin.HTTP.PublicRouter do
     conn =
       if Merlin.HTTP.RateLimit.allow?(conn.remote_ip) do
         {conn, body} = read_capped(conn)
-        handle_snitch(body, api_key_header(conn))
+        handle_snitch(body, api_key_header(conn), conn)
         conn
       else
         conn
@@ -128,12 +128,14 @@ defmodule Merlin.HTTP.PublicRouter do
   # accepting the device's -- and a device is usually the thing you cannot
   # change or test.
   # `read_capped/1` answers :too_large or :unreadable rather than a body.
-  defp handle_snitch(body, _key) when not is_binary(body) do
+  defp handle_snitch(body, key, conn), do: handle_snitch(body, key, conn, :dispatch)
+
+  defp handle_snitch(body, _key, _conn, :dispatch) when not is_binary(body) do
     Logger.info("snitch rejected: #{body}")
     :ok
   end
 
-  defp handle_snitch(body, header_key) when is_binary(header_key) do
+  defp handle_snitch(body, header_key, _conn, :dispatch) when is_binary(header_key) do
     case lookup(header_key) do
       {:ok, topic, id} ->
         Ingress.inject(topic, body, source: {:http, id})
@@ -149,7 +151,7 @@ defmodule Merlin.HTTP.PublicRouter do
     end
   end
 
-  defp handle_snitch(body, _no_header) do
+  defp handle_snitch(body, _no_header, conn, :dispatch) do
     case decode_snitch(body) do
       {:ok, challenge, status} ->
         case lookup(challenge) do
@@ -168,7 +170,11 @@ defmodule Merlin.HTTP.PublicRouter do
         end
 
       {:error, reason} ->
-        Logger.info("snitch rejected: #{reason}")
+        # The header NAMES too, never their values. Without them a request
+        # carrying a credential under a name merlin does not read is
+        # indistinguishable from one carrying none, and the operator is left
+        # guessing -- which is exactly where this deployment sat.
+        Logger.info("snitch rejected: #{reason}; headers present: #{header_names(conn)}")
         :ok
     end
   rescue
@@ -176,6 +182,11 @@ defmodule Merlin.HTTP.PublicRouter do
       # No key material in this message: `e` is an exception, not the body.
       Logger.warning("snitch handler raised: #{Exception.message(e)}")
       :ok
+  end
+
+  # Names only. A header VALUE may be the credential; a header NAME never is.
+  defp header_names(conn) do
+    conn.req_headers |> Enum.map(&elem(&1, 0)) |> Enum.sort() |> Enum.join(", ")
   end
 
   # `x-api-key` first, then `authorization: Bearer`. Both are conventional and
