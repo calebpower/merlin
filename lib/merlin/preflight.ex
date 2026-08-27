@@ -91,6 +91,16 @@ defmodule Merlin.Preflight do
       true ->
         case Merlin.Config.File.load(path) do
           {:ok, loaded} ->
+            # INSTALL it, so every check after this one reads the values the
+            # daemon will actually use.
+            #
+            # Without this, Config.public_port/0 and friends fall through to
+            # their defaults: preflight reported "listeners 8080, 8081" and
+            # "broker localhost:1883" while the config said port 1880 -- it
+            # was validating a different system from the one about to start,
+            # and would have passed with the real port already occupied.
+            Merlin.Config.put(loaded)
+
             {:ok, "config", "#{path} (#{map_size(loaded.groups)} group(s), #{length(loaded.sources)} source(s))"}
 
           {:error, errors} ->

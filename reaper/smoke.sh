@@ -585,7 +585,8 @@ if find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec grep -l "$API_KEY" {} \; 2>
 fi
 say "key absent from the log"
 
-"$KEYBIN" rm --key "$API_KEY" >/dev/null 2>&1 || die "merlin-key rm failed"
+rm_out="$REAPER_OUT/smoke-key-rm.txt"
+"$KEYBIN" rm --key "$API_KEY" > "$rm_out" 2>&1 || { cat "$rm_out"; die "merlin-key rm failed"; }
 say "revoked it"
 
 # ---------------------------------------------------------------------------

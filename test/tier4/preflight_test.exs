@@ -232,6 +232,49 @@ defmodule Merlin.PreflightTest do
     end
   end
 
+  # The defect the live deployment exposed: preflight loaded the config and
+  # never installed it, so every check after it read DEFAULTS. It reported
+  # "listeners 8080, 8081" while the config said 1880, and "broker localhost"
+  # from a default that happened to match -- validating a different system
+  # from the one about to start.
+  describe "the config's own values are what get checked" do
+    test "the listener check uses the port the config declares", %{config: config} do
+      System.delete_env("MERLIN_PUBLIC_PORT")
+      System.delete_env("MERLIN_LOCAL_PORT")
+
+      File.write!(config, ~s|%{
+        api: %{port: 18877},
+        zones: [],
+        groups: [],
+        sources: [],
+        rules: [%{id: :r, desc: "d", on: [{:changes, [:x]}], do: [{:log, :info, "x"}]}]
+      }|)
+
+      assert {:ok, "listeners", detail} = check("listeners")
+
+      assert detail =~ "18877",
+             "preflight checked a default port instead of the configured one: #{detail}"
+    end
+
+    test "the broker check uses the host and port the config declares", %{config: config} do
+      System.delete_env("MERLIN_BROKER_HOST")
+      System.delete_env("MERLIN_BROKER_PORT")
+
+      File.write!(config, ~s|%{
+        mqtt: %{host: "127.0.0.1", port: 1},
+        zones: [],
+        groups: [],
+        sources: [],
+        rules: [%{id: :r, desc: "d", on: [{:changes, [:x]}], do: [{:log, :info, "x"}]}]
+      }|)
+
+      assert {:error, "broker", why} = check("broker")
+
+      assert why =~ "127.0.0.1:1",
+             "preflight checked a default broker instead of the configured one: #{why}"
+    end
+  end
+
   describe "listeners" do
     test "passes when the ports are free" do
       for {v, p} <- [{"MERLIN_PUBLIC_PORT", "18999"}, {"MERLIN_LOCAL_PORT", "18998"}] do
