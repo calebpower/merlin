@@ -93,12 +93,12 @@ original `config.toml` and `merlin.db`; nothing in this deployment writes to it.
 
 ## Known, open
 
-  * **Your phone is not posting.** Zero `/snitch` requests since deployment.
-    It was pointed at the Python daemon, which has been down for a month. The
-    ingest path is proven working — a manual post with your existing key
-    returned 200 and resolved `person.caleb.zone` to `:home` — so this is the
-    phone app, not merlin. Until it posts, every presence rule sits at
-    `:unknown` and the soak proves nothing about them. Worth checking first.
+  * **The phone had a flat battery at deployment**, so there were no `/snitch`
+    requests and every presence fact sat at `:unknown`. The ingest path is
+    proven regardless — a manual post with the existing key returned 200 and
+    resolved `person.caleb.zone` to `:home`. Once it is charged and posting,
+    check that presence starts moving; the soak proves nothing about the
+    presence rules until it does.
 
   * Weather is not configured and never was; see the note in `merlin.exs`.
 
