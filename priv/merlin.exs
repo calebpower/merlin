@@ -216,10 +216,10 @@
       topic: "http/mobile/ariia/state",
       decode: :json,
       facts: [
-        %{path: [:person, :caleb, :lat], from: [["gps_latitude"]]},
-        %{path: [:person, :caleb, :lon], from: [["gps_longitude"]]},
-        %{path: [:person, :caleb, :accuracy_m], from: [["gps_accuracy"]]},
-        %{path: [:person, :caleb, :battery_pct], from: [["battery_level"]]}
+        %{path: [:person, :cal, :lat], from: [["gps_latitude"]]},
+        %{path: [:person, :cal, :lon], from: [["gps_longitude"]]},
+        %{path: [:person, :cal, :accuracy_m], from: [["gps_accuracy"]]},
+        %{path: [:person, :cal, :battery_pct], from: [["battery_level"]]}
       ]
     },
 
@@ -318,14 +318,14 @@
     # Modules, because this is geometry. Zone definitions are data, because
     # they are facts about your house.
     %{
-      id: :caleb_presence,
+      id: :cal_presence,
       kind: :geofence,
-      lat: [:person, :caleb, :lat],
-      lon: [:person, :caleb, :lon],
-      accuracy: [:person, :caleb, :accuracy_m],
+      lat: [:person, :cal, :lat],
+      lon: [:person, :cal, :lon],
+      accuracy: [:person, :cal, :accuracy_m],
       max_accuracy_m: 100,
-      out: [:person, :caleb, :zone],
-      out_position: [:person, :caleb, :position],
+      out: [:person, :cal, :zone],
+      out_position: [:person, :cal, :position],
       # A phone silent for half an hour is not evidence of being anywhere.
       # The Python recorded a checkin timestamp and never read it.
       stale_after_ms: 1_800_000
@@ -368,7 +368,7 @@
       id: :vehicle_with_phone,
       kind: :expr,
       out: [:vehicle, :car, :with_phone?],
-      compute: "within?(vehicle.car.position, person.caleb.position, 402.34)"
+      compute: "within?(vehicle.car.position, person.cal.position, 402.34)"
     },
     %{
       id: :vehicle_unaccounted,
@@ -408,7 +408,7 @@
       # true and the first is not, and the whole point of the tri-state is to
       # stop the daemon claiming knowledge it does not have. Propagation
       # already prevents the alert from firing.
-      compute: "person.caleb.zone == :home and vehicle.car.zone != :home",
+      compute: "person.cal.zone == :home and vehicle.car.zone != :home",
       hold: {:true_for, {2, :minute}}
     }
   ],
@@ -459,10 +459,10 @@
     %{
       id: :lamps_off_when_away,
       desc: "When I leave, turn the living room lamps off.",
-      on: [{:leaves, [:person, :caleb, :zone], :home}],
+      on: [{:leaves, [:person, :cal, :zone], :home}],
       # Only on a real departure. Leaving :home for :unknown means we lost the
       # phone, not that you went out.
-      when: "defined?(person.caleb.zone)",
+      when: "defined?(person.cal.zone)",
       do: [{:set_group, :living_room_lamps, :off}]
     },
 
@@ -471,7 +471,7 @@
     %{
       id: :lamps_on_when_arriving_after_dark,
       desc: "Turn the living room lamps on when I arrive home after dark.",
-      on: [{:enters, [:person, :caleb, :zone], :home}],
+      on: [{:enters, [:person, :cal, :zone], :home}],
       when: "sun.state == :night",
       do: [{:set_group, :living_room_lamps, :on}]
     },
@@ -677,7 +677,7 @@
               # :unknown, so comparing against the literal makes the whole
               # guard permanently :unknown and the rule never fires. The
               # compiler refuses that spelling now; this is the one that works.
-              when: "defined?(person.caleb.zone) and person.caleb.zone != :home",
+              when: "defined?(person.cal.zone) and person.cal.zone != :home",
               # Also :log. alerts.py gated this on a flag bug 2 made
               # unreachable, so it has never fired in production either.
               do: [{:notify, :log, "unexpected activity at home while I am away"}],
@@ -686,7 +686,7 @@
           ],
           fired: [
             %{
-              on: {:enters, [:person, :caleb, :zone], :home},
+              on: {:enters, [:person, :cal, :zone], :home},
               do: [{:log, :info, "intruder latch re-armed"}],
               goto: :armed
             }

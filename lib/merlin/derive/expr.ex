@@ -5,7 +5,7 @@ defmodule Merlin.Derive.Expr do
       %{
         id: :vehicle_away_from_home,
         out: [:vehicle, :car, :away_from_home?],
-        compute: "person.caleb.zone == :home and vehicle.car.zone != :home"
+        compute: "person.cal.zone == :home and vehicle.car.zone != :home"
       }
 
   ## Why derived facts are first class

@@ -13,7 +13,7 @@ Elixir modules are **abstraction layers**. Rules are **data**.
 
 A module knows that a HAPN tracker reports `gpsUTCTime` and that a geofence is
 a haversine comparison against a radius. A rule knows only that
-`person.caleb.zone == :home`. A topic string, a JSON field name or a unit
+`person.cal.zone == :home`. A topic string, a JSON field name or a unit
 conversion appearing anywhere outside an adapter is a bug in the layering.
 
 ```

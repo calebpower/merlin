@@ -417,14 +417,14 @@ say "snitch response: $(cat "$snitch_out")"
 i=0
 while [ "$i" -lt 20 ]; do
     lat=$("$REL/bin/merlin" rpc \
-        'IO.puts(inspect(Merlin.World.get([:person, :caleb, :lat])))' 2>>"$rpc_err" | tail -1)
+        'IO.puts(inspect(Merlin.World.get([:person, :cal, :lat])))' 2>>"$rpc_err" | tail -1)
     [ "$lat" != "nil" ] && break
     i=$((i + 1))
     sleep 0.2
 done
 
 case "$lat" in
-    *51.4779*) say "/snitch with a live-minted key produced person.caleb.lat = $lat" ;;
+    *51.4779*) say "/snitch with a live-minted key produced person.cal.lat = $lat" ;;
     *) tail -20 "$rpc_err" 2>/dev/null; die "the key did not inject a fact (lat=$lat)" ;;
 esac
 
@@ -458,7 +458,7 @@ post_position() {
 
 zone_now() {
     "$REL/bin/merlin" rpc \
-        'IO.puts(inspect(Merlin.World.get([:person, :caleb, :zone])))' 2>>"$rpc_err" | tail -1
+        'IO.puts(inspect(Merlin.World.get([:person, :cal, :zone])))' 2>>"$rpc_err" | tail -1
 }
 
 await_zone() {

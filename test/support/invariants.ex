@@ -20,7 +20,7 @@ defmodule Merlin.Test.Invariants do
         payload: ~s({"state":"ON"}),             # :publish only
         note: "door garage -> open",             # :step only
         settling?: false,
-        facts: %{[:person, :caleb, :zone] => :home, ...}
+        facts: %{[:person, :cal, :zone] => :home, ...}
       }
 
   `facts` is the world as it stood immediately after the entry. Carrying it per
@@ -117,7 +117,7 @@ defmodule Merlin.Test.Invariants do
     timeline
     |> transitions([:rule, :intruder_latch, :state])
     |> Enum.flat_map(fn {entry, from, to} ->
-      zone = Map.get(entry.facts, [:person, :caleb, :zone])
+      zone = Map.get(entry.facts, [:person, :cal, :zone])
 
       if from != :fired and to == :fired and zone == :home do
         ["the latch fired at seq #{entry.seq} while the phone was home"]
@@ -145,7 +145,7 @@ defmodule Merlin.Test.Invariants do
     timeline
     |> transitions([:rule, :intruder_latch, :state])
     |> Enum.flat_map(fn {entry, from, to} ->
-      zone = Map.get(entry.facts, [:person, :caleb, :zone], :absent)
+      zone = Map.get(entry.facts, [:person, :cal, :zone], :absent)
 
       if from != :fired and to == :fired and zone in [:unknown, :absent] do
         ["the latch fired at seq #{entry.seq} with the phone's location #{inspect(zone)}"]
@@ -168,7 +168,7 @@ defmodule Merlin.Test.Invariants do
     timeline
     |> transitions([:rule, :intruder_latch, :state])
     |> Enum.flat_map(fn {entry, from, to} ->
-      zone = Map.get(entry.facts, [:person, :caleb, :zone])
+      zone = Map.get(entry.facts, [:person, :cal, :zone])
 
       if from == :fired and to == :armed and zone != :home do
         ["the latch re-armed at seq #{entry.seq} with the phone at #{inspect(zone)}, not home"]

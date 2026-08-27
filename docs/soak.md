@@ -51,7 +51,7 @@ Ask the daemon directly:
   * A HAPN token refresh roughly every 48 minutes. That is bug 3's fix: the
     Python could only ever refresh reactively, after a 403 had already cost a
     poll.
-  * `person.caleb.zone` moving `:home` → `:away` → `:workshop` and back, and
+  * `person.cal.zone` moving `:home` → `:away` → `:workshop` and back, and
     reading `:unknown` only when the phone genuinely cannot be located.
   * Silence from the three alerting rules, unless something actually happened.
 
@@ -63,7 +63,7 @@ Pre-decided, so the decision is not made at 3am:
   * any vehicle alert while the car is demonstrably where you left it;
   * more than three restarts in ten minutes (`settle: boot` counts them);
   * the MQTT connection reconnect-looping;
-  * `person.caleb.zone` flapping between values while the phone sits still.
+  * `person.cal.zone` flapping between values while the phone sits still.
 
 ## Turning it on, after the fortnight
 
@@ -96,7 +96,7 @@ original `config.toml` and `merlin.db`; nothing in this deployment writes to it.
   * **The phone had a flat battery at deployment**, so there were no `/snitch`
     requests and every presence fact sat at `:unknown`. The ingest path is
     proven regardless — a manual post with the existing key returned 200 and
-    resolved `person.caleb.zone` to `:home`. Once it is charged and posting,
+    resolved `person.cal.zone` to `:home`. Once it is charged and posting,
     check that presence starts moving; the soak proves nothing about the
     presence rules until it does.
 

@@ -51,7 +51,7 @@ defmodule Merlin.ParityTest do
     "hooks/3dprinter_kobra_neo.py" => {:rule, :printer_power},
     "hooks/office_aircond.py" => {:rule, :office_load_shed},
     "hooks/alerts.py" => {:rule, :intruder_latch},
-    "hooks/user_location.py" => {:derived, :caleb_presence},
+    "hooks/user_location.py" => {:derived, :cal_presence},
     "runners/hapn_tracker.py" => {:derived, :hapn},
     # Ported as a capability, not enabled: the Python declares no weather
     # config, so it has never run and there are no credentials to migrate.
