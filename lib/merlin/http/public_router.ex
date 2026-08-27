@@ -47,7 +47,7 @@ defmodule Merlin.HTTP.PublicRouter do
     conn =
       if Merlin.HTTP.RateLimit.allow?(conn.remote_ip) do
         {conn, body} = read_capped(conn)
-        handle_snitch(body)
+        handle_snitch(body, api_key_header(conn))
         conn
       else
         conn
@@ -105,11 +105,6 @@ defmodule Merlin.HTTP.PublicRouter do
   # Never returns anything the caller can distinguish; its only job is the
   # side effect. Wrapped, because a raise here would still owe the client a
   # response and must not become a 500 that leaks which branch it reached.
-  defp handle_snitch(body) when not is_binary(body) do
-    Logger.info("snitch rejected: body was #{inspect(body)}")
-    :ok
-  end
-
   # The always-200 rule is about what the CLIENT learns, not what the operator
   # does. Collapsing every failure into a silent `:ok` meant a phone posting a
   # wrong key, a missing field or malformed JSON all produced an empty log and
@@ -119,7 +114,42 @@ defmodule Merlin.HTTP.PublicRouter do
   # The reason is logged; the key never is. A key's first eight characters are
   # stored precisely so a key can be identified without its secret, and eight
   # characters of a 192-bit key identify nothing on their own.
-  defp handle_snitch(body) do
+  # Two shapes, because the credential and the payload are different things
+  # and only one of them is merlin's business.
+  #
+  #   * `x-api-key: <key>` (or `authorization: Bearer <key>`) with the body as
+  #     the payload, verbatim. The device posts whatever it natively posts.
+  #   * `{"challenge": ..., "status": ...}` -- the Python's envelope, kept
+  #     working because things already use it.
+  #
+  # The header form is the better one and should have been the original. A
+  # credential in the body forces the body into merlin's envelope, which means
+  # the device has to be reconfigured to merlin's shape rather than merlin
+  # accepting the device's -- and a device is usually the thing you cannot
+  # change or test.
+  # `read_capped/1` answers :too_large or :unreadable rather than a body.
+  defp handle_snitch(body, _key) when not is_binary(body) do
+    Logger.info("snitch rejected: #{body}")
+    :ok
+  end
+
+  defp handle_snitch(body, header_key) when is_binary(header_key) do
+    case lookup(header_key) do
+      {:ok, topic, id} ->
+        Ingress.inject(topic, body, source: {:http, id})
+        KeyStore.with_db(fn db -> KeyStore.touch(db, id) end)
+
+      :error ->
+        Logger.info(
+          "snitch rejected: key #{key_prefix(header_key)} from the header is not " <>
+            "recognised, or is revoked or expired. `merlin-key list` shows what is accepted."
+        )
+
+        :ok
+    end
+  end
+
+  defp handle_snitch(body, _no_header) do
     case decode_snitch(body) do
       {:ok, challenge, status} ->
         case lookup(challenge) do
@@ -146,6 +176,22 @@ defmodule Merlin.HTTP.PublicRouter do
       # No key material in this message: `e` is an exception, not the body.
       Logger.warning("snitch handler raised: #{Exception.message(e)}")
       :ok
+  end
+
+  # `x-api-key` first, then `authorization: Bearer`. Both are conventional and
+  # neither costs anything to accept.
+  defp api_key_header(conn) do
+    case Plug.Conn.get_req_header(conn, "x-api-key") do
+      [key | _] when is_binary(key) and key != "" ->
+        key
+
+      _ ->
+        case Plug.Conn.get_req_header(conn, "authorization") do
+          ["Bearer " <> key | _] when key != "" -> key
+          ["bearer " <> key | _] when key != "" -> key
+          _ -> nil
+        end
+    end
   end
 
   # Every way a body can fail to be a position report, named.
