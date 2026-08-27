@@ -64,6 +64,38 @@ defmodule Merlin.Config do
     end
   end
 
+  @doc "Where the key database lives."
+  @spec db_path() :: binary()
+  def db_path do
+    env("MERLIN_DB") || dig([:api, :db_path]) ||
+      Path.join(state_dir(), "merlin.db")
+  end
+
+  @doc "State directory: the key database, and later the fact snapshot."
+  @spec state_dir() :: binary()
+  def state_dir, do: env("MERLIN_STATE_DIR") || app(:state_dir, "/var/db/merlin")
+
+  @doc "Address the public listener binds. Defaults to all interfaces: the phone posts to it."
+  @spec public_ip() :: :inet.ip_address()
+  def public_ip do
+    case env("MERLIN_PUBLIC_IP") do
+      nil -> {0, 0, 0, 0}
+      addr -> addr |> String.to_charlist() |> :inet.parse_address() |> elem(1)
+    end
+  end
+
+  @doc "Public listener port: /snitch and /healthz."
+  @spec public_port() :: pos_integer()
+  def public_port, do: int(env("MERLIN_PUBLIC_PORT") || dig([:api, :port]) || app(:public_port, 8080))
+
+  @doc "Loopback listener port: /facts.json and /rules.json."
+  @spec local_port() :: pos_integer()
+  def local_port, do: int(env("MERLIN_LOCAL_PORT") || app(:local_port, 8081))
+
+  @doc "Whether to start the HTTP listeners. False under test."
+  @spec start_http?() :: boolean()
+  def start_http?, do: Application.get_env(:merlin, :start_http, true)
+
   @doc "Whether to open a broker connection at boot. False under test."
   @spec start_mqtt?() :: boolean()
   def start_mqtt?, do: Application.get_env(:merlin, :start_mqtt, true)
@@ -150,4 +182,7 @@ defmodule Merlin.Config do
   defp app(key, default), do: Application.get_env(:merlin, key, default)
 
   defp dig(keys), do: get_in(loaded(), keys)
+
+  defp int(v) when is_integer(v), do: v
+  defp int(v) when is_binary(v), do: String.to_integer(v)
 end

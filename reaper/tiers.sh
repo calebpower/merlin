@@ -71,15 +71,15 @@ tier 1 "pure unit" mix test --only tier1 --warnings-as-errors
 
 skip 2 "component conformance" "deferred to M9; no rendered markup exists yet"
 tier 3 "source-as-data" mix test --only tier3 --warnings-as-errors
-skip 4 "server contract"       "lands with POST /snitch in M3"
+tier 4 "server contract" mix test --only tier4 --warnings-as-errors
 
 # ---------------------------------------------------------------------------
 # Tiers 5-9: need the broker and/or the full stack.
 # ---------------------------------------------------------------------------
 skip 5 "daemon vs fakes"    "Mox over Merlin.MQTT.Client; lands M2/M6"
 tier 6 "full stack (smoke)" sh reaper/smoke.sh
-skip 7 "seeded fuzzing"     "next after tier 1 -- highest defect-per-line; M3"
-skip 8 "concurrency"        "lands with the SQLite WAL claim in M3"
+tier 7 "seeded fuzzing" mix test --only tier7 --warnings-as-errors
+tier 8 "concurrency" mix test --only tier8 --warnings-as-errors
 skip 9 "simulated house"    "lands at M7; needs persistence and the settle period"
 
 skip 10 "live browser audit" "deferred to M9"

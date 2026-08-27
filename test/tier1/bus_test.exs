@@ -14,7 +14,15 @@ defmodule Merlin.BusTest do
 
   alias Merlin.{Bus, Change, Event}
 
-  defp uniq, do: "#{System.unique_integer([:positive])}"
+  # A unique ROOT per test, not a unique leaf.
+  #
+  # These tests are async against a process-global Registry, so a subscription
+  # to a broad prefix in one test is live while another publishes beneath it.
+  # The dedup test legitimately needs to subscribe at [:door] -- "every door"
+  # -- and with a shared root that made every sibling test's "expected zero
+  # subscribers" assertion race against it. Unique roots make the tests
+  # genuinely independent instead of accidentally so.
+  defp uniq, do: "bus-#{System.unique_integer([:positive])}"
 
   defp change(path), do: %Change{
     path: path,
@@ -42,8 +50,8 @@ defmodule Merlin.BusTest do
 
   describe "prefix matching" do
     test "an exact subscription receives its own path" do
-      id = uniq()
-      p = [:door, id, :contact]
+      root = uniq()
+      p = [root, "contact"]
       Bus.subscribe(p)
 
       assert 1 = Bus.publish(change(p))
@@ -51,35 +59,35 @@ defmodule Merlin.BusTest do
     end
 
     test "a shorter prefix receives everything beneath it" do
-      id = uniq()
-      Bus.subscribe([:door, id])
+      root = uniq()
+      Bus.subscribe([root])
 
-      assert 1 = Bus.publish(change([:door, id, :contact]))
+      assert 1 = Bus.publish(change([root, "contact"]))
       assert_receive {:merlin, %Change{}}
 
-      assert 1 = Bus.publish(change([:door, id, :battery]))
+      assert 1 = Bus.publish(change([root, "battery"]))
       assert_receive {:merlin, %Change{}}
     end
 
     test "the empty prefix receives everything" do
       Bus.subscribe([])
-      assert Bus.publish(change([:anything, uniq()])) >= 1
+      assert Bus.publish(change([uniq(), "anything"])) >= 1
       assert_receive {:merlin, %Change{}}
     end
 
     test "a sibling prefix receives nothing" do
-      id = uniq()
-      Bus.subscribe([:door, id, :contact])
+      root = uniq()
+      Bus.subscribe([root, "contact"])
 
-      assert 0 = Bus.publish(change([:door, id, :battery]))
+      assert 0 = Bus.publish(change([root, "battery"]))
       refute_receive {:merlin, %Change{}}, 50
     end
 
     test "a longer prefix does not receive a shorter path" do
-      id = uniq()
-      Bus.subscribe([:door, id, :contact, :deep])
+      root = uniq()
+      Bus.subscribe([root, "contact", "deep"])
 
-      assert 0 = Bus.publish(change([:door, id, :contact]))
+      assert 0 = Bus.publish(change([root, "contact"]))
       refute_receive {:merlin, %Change{}}, 50
     end
   end
@@ -90,12 +98,12 @@ defmodule Merlin.BusTest do
       # change, not twice. Without the dedupe in deliver/3 this is a
       # double-actuation bug that only shows up when someone adds a second,
       # broader subscription to an existing rule.
-      id = uniq()
-      Bus.subscribe([:door])
-      Bus.subscribe([:door, id])
-      Bus.subscribe([:door, id, :contact])
+      root = uniq()
+      Bus.subscribe([root])
+      Bus.subscribe([root, "office"])
+      Bus.subscribe([root, "office", "contact"])
 
-      assert 1 = Bus.publish(change([:door, id, :contact]))
+      assert 1 = Bus.publish(change([root, "office", "contact"]))
 
       assert_receive {:merlin, %Change{}}
       refute_receive {:merlin, %Change{}}, 50
@@ -104,8 +112,8 @@ defmodule Merlin.BusTest do
 
   describe "facts and events are separate namespaces" do
     test "a fact subscriber does not receive events on the same path" do
-      id = uniq()
-      p = [:button, id]
+      root = uniq()
+      p = [root, "pressed"]
       Bus.subscribe(p)
 
       assert 0 = Bus.emit(event(p))
@@ -113,8 +121,8 @@ defmodule Merlin.BusTest do
     end
 
     test "an event subscriber does not receive changes on the same path" do
-      id = uniq()
-      p = [:button, id]
+      root = uniq()
+      p = [root, "pressed"]
       Bus.subscribe_events(p)
 
       assert 0 = Bus.publish(change(p))
@@ -124,8 +132,8 @@ defmodule Merlin.BusTest do
 
   describe "unsubscribe" do
     test "stops delivery" do
-      id = uniq()
-      p = [:door, id]
+      root = uniq()
+      p = [root, "contact"]
       Bus.subscribe(p)
       assert 1 = Bus.publish(change(p))
       assert_receive {:merlin, %Change{}}
@@ -138,8 +146,8 @@ defmodule Merlin.BusTest do
     test "a dead subscriber is dropped automatically" do
       # Registry unregisters on process death. The Python callback list could
       # not: a dead hook stayed subscribed for the life of the daemon.
-      id = uniq()
-      p = [:door, id]
+      root = uniq()
+      p = [root, "contact"]
       test_pid = self()
 
       {:ok, sub} =

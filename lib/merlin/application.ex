@@ -37,7 +37,7 @@ defmodule Merlin.Application do
 
         # The sole process permitted to write facts.
         Merlin.World.Writer
-      ] ++ mqtt_children()
+      ] ++ mqtt_children() ++ http_children()
 
     opts = [
       strategy: :rest_for_one,
@@ -56,6 +56,12 @@ defmodule Merlin.Application do
     if Merlin.Config.start_mqtt?(),
       do: [Merlin.MQTT.Connection, Merlin.Rules.Engine],
       else: []
+  end
+
+  # Started last, and after the world exists: /healthz answering 200 must mean
+  # the daemon is actually able to serve, not merely that a port is bound.
+  defp http_children do
+    if Merlin.Config.start_http?(), do: [Merlin.HTTP.Supervisor], else: []
   end
 
   # A bad config is a refusal to start, not a warning.

@@ -37,6 +37,19 @@ defmodule Merlin.MQTT.Connection do
     GenServer.call(__MODULE__, {:publish, topic, payload, opts})
   end
 
+  @doc """
+  Inject a payload as though it had arrived on `topic`.
+
+  The HTTP ingress path. It routes through the same router and the same
+  adapters as a broker message, so a source binding cannot tell the two apart
+  -- which is what lets the phone's `http/mobile/ariia/state` be an ordinary
+  declarative source rather than a special case.
+  """
+  @spec inject(binary(), binary(), keyword()) :: non_neg_integer()
+  def inject(topic, payload, opts \\ []) do
+    GenServer.call(__MODULE__, {:inject, topic, payload, opts})
+  end
+
   @doc "Whether the broker connection is currently up."
   @spec connected?() :: boolean()
   def connected?, do: GenServer.call(__MODULE__, :connected?)
@@ -94,6 +107,22 @@ defmodule Merlin.MQTT.Connection do
 
   def handle_call({:publish, topic, payload, opts}, _from, state) do
     {:reply, state.client.publish(state.handle, topic, payload, opts), state}
+  end
+
+  def handle_call({:inject, topic, payload, opts}, _from, state) do
+    matches = Router.match(state.router, topic)
+
+    Enum.each(matches, fn {{module, adapter_opts}, captures} ->
+      dispatch(module, adapter_opts, topic, payload, captures, state)
+    end)
+
+    if matches == [] do
+      # Not an error: a key may be minted for a topic no source binds yet.
+      # Reporting the count lets the caller notice, which the Python could not.
+      Logger.debug("injected #{topic} matched no source (#{inspect(opts[:source])})")
+    end
+
+    {:reply, length(matches), state}
   end
 
   def handle_call(:connected?, _from, state), do: {:reply, state.connected?, state}

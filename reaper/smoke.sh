@@ -39,6 +39,12 @@ say "config: $MERLIN_CONFIG"
 # broker. Turn it off for the smoke run only.
 export MERLIN_DRY_RUN=false
 
+# Distinct ports so a leftover daemon from an earlier run cannot be the thing
+# answering -- a check that talks to the wrong process is worse than no check.
+MERLIN_PUBLIC_PORT=18080
+MERLIN_LOCAL_PORT=18081
+export MERLIN_PUBLIC_PORT MERLIN_LOCAL_PORT
+
 export MERLIN_BROKER_HOST=127.0.0.1
 export MERLIN_BROKER_PORT=1883
 export MERLIN_CLIENT_ID="merlin-smoke-$$"
@@ -210,6 +216,99 @@ for t in lamp_1 lamp_2; do
     /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r -n \
         -t "zigbee2mqtt/home/living_room/plug/$t" 2>/dev/null || true
 done
+
+# ---------------------------------------------------------------------------
+# The M3 demonstrable: key management, and a real key injecting a real fact.
+#
+# The requirement is specific and is why SQLite was chosen over CubDB: the CLI
+# must work with the daemon STOPPED and with it RUNNING, and a key minted while
+# it runs must be accepted without a restart.
+# ---------------------------------------------------------------------------
+say "checking key management against the running daemon"
+
+KEYBIN="$REL/bin/merlin-key"
+[ -x "$KEYBIN" ] || die "merlin-key overlay missing from the release"
+
+# Mint while the daemon is up. WAL is what makes this legal at all.
+mint_out="$REAPER_OUT/smoke-key-add.txt"
+"$KEYBIN" add --topic 'http/mobile/ariia/state' --label smoke > "$mint_out" 2>&1 \
+    || { cat "$mint_out"; die "merlin-key add failed while the daemon was running"; }
+
+API_KEY=$(awk '/^  key:/ {print $2}' "$mint_out")
+[ -n "$API_KEY" ] || { cat "$mint_out"; die "no key in merlin-key add output"; }
+say "minted a key while the daemon was running"
+
+"$KEYBIN" list > "$REAPER_OUT/smoke-key-list.txt" 2>&1 || die "merlin-key list failed"
+grep -q 'http/mobile/ariia/state' "$REAPER_OUT/smoke-key-list.txt" \
+    || die "the minted key is not in merlin-key list"
+
+# The plaintext must not be recoverable from the listing.
+if grep -q "$API_KEY" "$REAPER_OUT/smoke-key-list.txt"; then
+    die "merlin-key list printed the key itself -- it is supposed to be stored hashed"
+fi
+say "list shows the key without revealing it"
+
+# No restart, no reload: the running daemon must accept it on the next request.
+say "posting to /snitch with the key just minted"
+snitch_out="$REAPER_OUT/smoke-snitch.txt"
+
+# The client is `bin/merlin eval` using OTP's own :httpc. Not fetch(1), which
+# is a download tool and silently discards a request body; not curl or python,
+# neither of which is reliably on this template -- the guest description lists
+# python312 but it is not at /usr/local/bin/python3 here, and guessing at the
+# guest's contents is what produced the last two failures.
+#
+# `eval` boots a SEPARATE beam, so this is a real external client over real
+# TCP through Bandit, not the daemon calling itself in-process.
+#
+# Key and port travel in the environment rather than being interpolated into
+# the expression: same reasoning as the merlin-key overlay.
+MERLIN_SMOKE_KEY="$API_KEY" MERLIN_SMOKE_PORT="$MERLIN_PUBLIC_PORT" \
+"$REL/bin/merlin" eval '
+  :inets.start()
+  key = System.get_env("MERLIN_SMOKE_KEY")
+  port = System.get_env("MERLIN_SMOKE_PORT")
+
+  body =
+    Jason.encode!(%{
+      challenge: key,
+      status: %{gps_latitude: 35.9606, gps_longitude: -83.9207, gps_accuracy: 12}
+    })
+
+  url = ~c"http://127.0.0.1:#{port}/snitch"
+
+  case :httpc.request(:post, {url, [], ~c"application/json", body}, [], []) do
+    {:ok, {{_, status, _}, _, resp}} -> IO.puts("status=#{status} body=#{resp}")
+    other -> IO.puts("request failed: #{inspect(other)}")
+  end
+' > "$snitch_out" 2>&1 || true
+
+say "snitch response: $(cat "$snitch_out")"
+
+i=0
+while [ "$i" -lt 20 ]; do
+    lat=$("$REL/bin/merlin" rpc \
+        'IO.puts(inspect(Merlin.World.get([:person, :caleb, :lat])))' 2>>"$rpc_err" | tail -1)
+    [ "$lat" != "nil" ] && break
+    i=$((i + 1))
+    sleep 0.2
+done
+
+case "$lat" in
+    *35.9606*) say "/snitch with a live-minted key produced person.caleb.lat = $lat" ;;
+    *) tail -20 "$rpc_err" 2>/dev/null; die "the key did not inject a fact (lat=$lat)" ;;
+esac
+
+# The leak that actually happened: api.py logged the request body, and the key
+# travels in it.
+say "checking the key is absent from the daemon log"
+if find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec grep -l "$API_KEY" {} \; 2>/dev/null | grep -q .; then
+    die "the API key appears in the daemon log -- api.py:31 all over again"
+fi
+say "key absent from the log"
+
+"$KEYBIN" rm --key "$API_KEY" >/dev/null 2>&1 || die "merlin-key rm failed"
+say "revoked it"
 
 # ---------------------------------------------------------------------------
 # dry_run must actually block effects.

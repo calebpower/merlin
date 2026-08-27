@@ -284,7 +284,7 @@ defmodule Merlin.ExprTest do
     test "module calls" do
       assert {:error, _} = Expr.compile("System.cmd(\"rm\", [\"-rf\", \"/\"])")
       assert {:error, _} = Expr.compile("File.read!(\"/etc/passwd\")")
-      assert {:error, _} = Expr.compile(":os.cmd('id')")
+      assert {:error, _} = Expr.compile(~S|:os.cmd(~c"id")|)
     end
 
     test "anonymous functions" do

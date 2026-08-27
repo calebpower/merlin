@@ -92,6 +92,27 @@
       ]
     },
 
+    # --- the phone, via POST /snitch (mobile_device.py) --------------------
+    # Not a broker topic: an API key resolves to this string and the payload is
+    # injected as though it had arrived on it. The source cannot tell.
+    #
+    # This is bug 1 from the survey, fixed at the boundary. mobile_device.py
+    # stored the raw payload STRING, and user_location.py then subscripted it
+    # as a dict -- raising TypeError inside a fire-and-forget task on every
+    # single phone update, silently. Decoding to structured facts at ingest
+    # makes that class of error unrepresentable.
+    %{
+      id: :phone,
+      topic: "http/mobile/ariia/state",
+      decode: :json,
+      facts: [
+        %{path: [:person, :caleb, :lat], from: [["gps_latitude"]]},
+        %{path: [:person, :caleb, :lon], from: [["gps_longitude"]]},
+        %{path: [:person, :caleb, :accuracy_m], from: [["gps_accuracy"]]},
+        %{path: [:person, :caleb, :battery_pct], from: [["battery_level"]]}
+      ]
+    },
+
     # --- doors (home_doors.py) --------------------------------------------
     # One source covers every room. The Python hand-rolled a `+` matcher to
     # achieve this and stored the result as a JSON string containing a list of

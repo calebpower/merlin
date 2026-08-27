@@ -18,7 +18,12 @@ defmodule Merlin.MixProject do
 
   def application do
     [
-      extra_applications: [:logger, :crypto],
+      # :inets is not used by the daemon. It is included so that
+      # `bin/merlin eval` has an HTTP client available -- which is how the
+      # smoke tier posts to /snitch as a genuinely external process, without
+      # depending on curl or python being present on the guest. Both were
+      # assumed and neither was there.
+      extra_applications: [:logger, :crypto, :inets, :ssl],
       mod: {Merlin.Application, []}
     ]
   end
