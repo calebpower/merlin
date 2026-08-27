@@ -45,7 +45,7 @@ defmodule Merlin.Expr do
   person would call an algorithm is a module by definition.
   """
 
-  defstruct [:source, :fun, :deps]
+  defstruct [:source, :fun, :deps, :node]
 
   @type value :: term() | :unknown
   @type env :: %{
@@ -101,7 +101,7 @@ defmodule Merlin.Expr do
   def compile(source) when is_binary(source) do
     with {:ok, ast} <- parse(source),
          {:ok, node} <- check(ast) do
-      {:ok, %__MODULE__{source: source, fun: build(node), deps: extract_deps(node)}}
+      {:ok, %__MODULE__{source: source, fun: build(node), deps: extract_deps(node), node: node}}
     end
   end
 
@@ -166,6 +166,40 @@ defmodule Merlin.Expr do
   end
 
   # Operators.
+  # `x == :unknown` and `x != :unknown` cannot mean what they look like.
+  #
+  # Every operator propagates :unknown: if any operand is :unknown the result
+  # is :unknown, which is what makes the tri-state safe. But that rule cannot
+  # tell the VALUE :unknown from the LITERAL :unknown, so writing the literal
+  # into a comparison makes the whole expression permanently :unknown -- and a
+  # guard that is always :unknown never fires, silently, for ever.
+  #
+  # This is not hypothetical: the intruder latch was written as
+  # `zone != :home and zone != :unknown`, which reads exactly right, compiles,
+  # loads, and disabled the rule completely. The smoke tier caught it; a
+  # fortnight of quiet dry-run logs would not have.
+  #
+  # `unknown?/1` and `defined?/1` are builtins precisely because they bypass
+  # the propagation, so they are the only way to ask this question.
+  defp check({op, _meta, [_, :unknown]} = node) when op in [:==, :!=],
+    do: {:error, unknown_literal_error(node, op)}
+
+  defp check({op, _meta, [:unknown, _]} = node) when op in [:==, :!=],
+    do: {:error, unknown_literal_error(node, op)}
+
+  # `x in [:home, :unknown]` fails the same way and less visibly: if x IS
+  # :unknown the propagation rule sees an :unknown operand and answers
+  # :unknown, so the membership test can never be true for the one value it
+  # was written to catch.
+  defp check({:in, _meta, [_, list]} = node) when is_list(list) do
+    if :unknown in list do
+      {:error, unknown_literal_error(node, :==)}
+    else
+      {op, _meta2, args} = node
+      with {:ok, checked} <- check_all(args), do: {:ok, {:op, op, checked}}
+    end
+  end
+
   defp check({op, _meta, args}) when op in @operators and is_list(args) do
     with {:ok, checked} <- check_all(args), do: {:ok, {:op, op, checked}}
   end
@@ -211,6 +245,14 @@ defmodule Merlin.Expr do
 
   defp check(other), do: {:error, {:forbidden_syntax, Macro.to_string(other)}}
 
+  defp unknown_literal_error(node, op) do
+    suggestion = if op == :==, do: "unknown?(x)", else: "defined?(x)"
+
+    {:unknown_literal_comparison, Macro.to_string(node),
+     "comparing against the literal :unknown is always :unknown, so the " <>
+       "expression can never be true. Use #{suggestion} instead."}
+  end
+
   defp check_all(items) do
     Enum.reduce_while(items, {:ok, []}, fn item, {:ok, acc} ->
       case check(item) do
@@ -237,6 +279,53 @@ defmodule Merlin.Expr do
   defp path_segments(_), do: :error
 
   # --- dependency extraction ------------------------------------------------
+
+  @doc """
+  Atoms this expression compares a `.zone` fact against.
+
+  For the boot validator. A guard reading `person.caleb.zone == :work` in a
+  house that declares no `:work` zone is not an error anywhere -- it compiles,
+  it loads, and it is simply never true. The rule then does nothing, for ever,
+  silently, and the house looks quiet rather than broken.
+
+  That is not hypothetical: the configuration shipped through M7 compared
+  against `:work` and `:gym`, neither of which this house has ever had.
+  """
+  @spec zone_atoms(t()) :: [atom()]
+  def zone_atoms(%__MODULE__{node: node}), do: node |> collect_zone_atoms() |> Enum.uniq()
+  def zone_atoms(_), do: []
+
+  defp collect_zone_atoms({:op, op, [a, b]}) when op in [:==, :!=] do
+    case {a, b} do
+      {{:fact, path}, {:lit, atom}} when is_atom(atom) -> zone_atom(path, atom)
+      {{:lit, atom}, {:fact, path}} when is_atom(atom) -> zone_atom(path, atom)
+      _ -> collect_zone_atoms(a) ++ collect_zone_atoms(b)
+    end
+  end
+
+  # `zone in [:home, :workshop]` is the natural way to write the enumerated
+  # form, and every element of it can be wrong in exactly the same way.
+  defp collect_zone_atoms({:op, :in, [{:fact, path}, {:list, items}]}) do
+    Enum.flat_map(items, fn
+      {:lit, atom} when is_atom(atom) -> zone_atom(path, atom)
+      other -> collect_zone_atoms(other)
+    end)
+  end
+
+  defp collect_zone_atoms({:op, _, args}), do: Enum.flat_map(args, &collect_zone_atoms/1)
+  defp collect_zone_atoms({:call, _, args}), do: Enum.flat_map(args, &collect_zone_atoms/1)
+  defp collect_zone_atoms({:list, items}), do: Enum.flat_map(items, &collect_zone_atoms/1)
+  defp collect_zone_atoms(_), do: []
+
+  # Only paths that actually name a zone. Comparing `printer.state == :idle`
+  # against the zone list would be nonsense.
+  defp zone_atom(path, atom) do
+    # :unknown and :away are not zones; they are the two answers the geofence
+    # gives when the point is in no named circle. Rules compare against both.
+    if List.last(path) == :zone and atom not in [:unknown, :away, nil, true, false],
+      do: [atom],
+      else: []
+  end
 
   defp extract_deps({:fact, segments}), do: [segments]
   defp extract_deps({:op, _, args}), do: Enum.flat_map(args, &extract_deps/1)

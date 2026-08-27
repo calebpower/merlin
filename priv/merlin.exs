@@ -52,10 +52,18 @@
   #
   # Coordinates are approximate placeholders. Replace with the real ones before
   # cutover; nothing here is a secret, but nothing here is right either.
+  # Taken from the Python's [[hooks.regions]] on merlin itself, not invented.
+  # The values that were here before were plausible-looking coordinates in the
+  # wrong STATE, which would have left every presence rule permanently
+  # :unknown -- a house that looked quiet rather than broken.
   zones: [
-    %{id: :home, center: {35.9606, -83.9207}, radius: {400, :ft}, hysteresis: 1.25},
-    %{id: :work, center: {35.9132, -84.3110}, radius: {0.25, :mi}},
-    %{id: :gym, center: {35.9401, -83.9951}, radius: {600, :ft}}
+    %{
+      id: :home,
+      center: {51.4779, -0.0015},
+      radius: {0.25, :mi},
+      hysteresis: 1.25
+    },
+    %{id: :workshop, center: {51.5537, -0.0708}, radius: {0.25, :mi}}
   ],
 
   # Separate from any zone radius: "is the car with my phone" is a different
@@ -349,7 +357,17 @@
       id: :vehicle_unaccounted,
       kind: :expr,
       out: [:vehicle, :car, :unaccounted?],
-      compute: "unknown?(vehicle.car.zone) and vehicle.car.with_phone? == false",
+      # `== :away`, not `unknown?`. A tracker that has gone dark is not
+      # evidence of theft, it is evidence of a dead tracker -- and alerting on
+      # it is the false-positive that trains you to ignore the alert. This
+      # fires only when the car is visibly somewhere unnamed and not with the
+      # phone.
+      #
+      # The cost, stated: a thief who disables the tracker produces :unknown
+      # and no alert. That is the same trade every rule here makes -- merlin
+      # does not act on what it cannot see -- and it is why this is pointed at
+      # :log until you have watched it.
+      compute: "vehicle.car.zone == :away and vehicle.car.with_phone? == false",
       # Your decision at planning. alerts.py fired on the first false-edge of a
       # flag derived from one GPS reading, so a single bounced fix at a zone
       # edge was an alert. Two minutes of continuous truth, or nothing.
@@ -359,7 +377,12 @@
       id: :vehicle_away_while_home,
       kind: :expr,
       out: [:vehicle, :car, :away_while_home?],
-      compute: "person.caleb.zone == :home and vehicle.car.zone != :home",
+      # The :unknown exclusion matters here too: without it a tracker outage
+      # while you are sitting at home reads as "the car is not home" and
+      # alarms.
+      compute:
+        "person.caleb.zone == :home and defined?(vehicle.car.zone) and " <>
+          "vehicle.car.zone != :home",
       hold: {:true_for, {2, :minute}}
     }
   ],
@@ -616,9 +639,19 @@
           armed: [
             %{
               on: {:changes_under, [:door]},
-              # Enumerated rather than `!= :home`, so an :unknown zone -- we
-              # lost the phone -- cannot fire an intruder alert.
-              when: "person.caleb.zone == :work or person.caleb.zone == :gym",
+              # Any time we can SEE he is not home -- at the workshop, at the
+              # supermarket, anywhere with a usable fix outside the house.
+              #
+              # The :unknown exclusion is what stops a lost phone from firing
+              # an intruder alert, and it is the whole reason :away had to
+              # exist separately: before it, "somewhere unnamed" and "no fix"
+              # were the same value, so excluding one excluded both and this
+              # rule could only ever fire at the workshop.
+              # `defined?`, not `!= :unknown`. Every operator propagates
+              # :unknown, so comparing against the literal makes the whole
+              # guard permanently :unknown and the rule never fires. The
+              # compiler refuses that spelling now; this is the one that works.
+              when: "defined?(person.caleb.zone) and person.caleb.zone != :home",
               # Also :log. alerts.py gated this on a flag bug 2 made
               # unreachable, so it has never fired in production either.
               do: [{:notify, :log, "unexpected activity at home while I am away"}],

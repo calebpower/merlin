@@ -62,11 +62,33 @@ defmodule Merlin.ZonesTest do
       assert Zones.resolve(@home, :unknown, zones()) == :home
     end
 
-    test "a point well outside every zone is :unknown, not nil and not false" do
+    test "a point well outside every zone is :away, not :unknown" do
       # The tri-state. `nil` or `false` here would be indistinguishable from
       # "not home", which is the exact confusion that killed the Python's away
       # detection.
-      assert Zones.resolve({0.0, 0.0}, :unknown, zones()) == :unknown
+      # A usable fix in the Gulf of Guinea is not "we do not know where he
+      # is"; it is "he is not in any of these circles". Rules act on the
+      # second and decline on the first, and conflating them made every
+      # away-rule decline for ever.
+      assert Zones.resolve({0.0, 0.0}, :unknown, zones()) == :away
+    end
+
+    # The distinction itself, stated once so it cannot be eroded by accident.
+    # Every away-rule in the house depends on these being different values:
+    # rules act on :away and decline on :unknown, so collapsing them either
+    # stops the house reacting to you being out, or starts it alarming when it
+    # has merely lost your phone.
+    test ":away and :unknown are different answers to different questions" do
+      somewhere_else = {0.0, 0.0}
+
+      assert Zones.resolve(somewhere_else, :unknown, zones()) == :away,
+             "a usable fix outside every zone must be :away"
+
+      assert Zones.resolve(:unknown, :unknown, zones()) == :unknown,
+             "no usable fix at all must be :unknown"
+
+      refute Zones.resolve(somewhere_else, :unknown, zones()) ==
+               Zones.resolve(:unknown, :unknown, zones())
     end
 
     test "an absent position is :unknown" do
@@ -98,8 +120,9 @@ defmodule Merlin.ZonesTest do
       assert Zones.resolve(@home, :unknown, concentric) == :small
     end
 
-    test "an empty zone set yields :unknown for any point" do
-      assert Zones.resolve(@home, :unknown, %{}) == :unknown
+    test "an empty zone set yields :away for any usable point" do
+      # There is nowhere to be inside, but the fix is still good.
+      assert Zones.resolve(@home, :unknown, %{}) == :away
     end
   end
 
@@ -108,7 +131,7 @@ defmodule Merlin.ZonesTest do
       # 130m out: beyond the 121.92m entry radius, inside the 152.4m exit one.
       point = north_of(@home, 130)
 
-      assert Zones.resolve(point, :unknown, zones()) == :unknown,
+      assert Zones.resolve(point, :unknown, zones()) == :away,
              "entered the zone from outside at a distance only the exit radius covers"
     end
 
@@ -124,14 +147,17 @@ defmodule Merlin.ZonesTest do
       # That asymmetry IS the anti-flap, so it is asserted directly.
       point = north_of(@home, 130)
 
-      assert Zones.resolve(point, :unknown, zones()) == :unknown
+      assert Zones.resolve(point, :unknown, zones()) == :away
       assert Zones.resolve(point, :home, zones()) == :home
     end
 
     test "beyond the exit radius you are out regardless of history" do
+      # Out is :away, not :unknown -- the fix is perfectly good, it is simply
+      # not inside anything. Being previously home widens the home radius and
+      # nothing else, so past the exit radius the history stops mattering.
       point = north_of(@home, 200)
-      assert Zones.resolve(point, :home, zones()) == :unknown
-      assert Zones.resolve(point, :unknown, zones()) == :unknown
+      assert Zones.resolve(point, :home, zones()) == :away
+      assert Zones.resolve(point, :unknown, zones()) == :away
     end
 
     test "a jittering fix does not oscillate" do
@@ -150,7 +176,15 @@ defmodule Merlin.ZonesTest do
 
   describe "the truth table from user_location.py:81-90" do
     # m_loc | v_loc | v_m_nearby || user_loc | v_safe
-    # transcribed as executable assertions. `?` is :unknown.
+    # transcribed as executable assertions. `?` is the Python's single
+    # not-in-a-zone value.
+    #
+    # NOTE: the Python had ONE value for both "somewhere unnamed" and "no
+    # usable fix", and that conflation is the defect the Elixir splits into
+    # :away and :unknown. This table is transcribed as the Python wrote it,
+    # because its purpose is to record what was being replaced. Where the
+    # Elixir's behaviour intentionally differs -- a dead tracker no longer
+    # reads as an unaccounted-for car -- the rule that differs says so.
     #
     # v_safe in the original was `v_loc is not None or v_m_nearby` -- the
     # vehicle is accounted for if it is in ANY known zone, or if it is with the

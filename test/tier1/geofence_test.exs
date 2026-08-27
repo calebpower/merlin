@@ -20,8 +20,8 @@ defmodule Merlin.GeofenceProcessTest do
 
   alias Merlin.{Derive, World, Zones}
 
-  @home {35.9606, -83.9207}
-  @work {35.9132, -84.3110}
+  @home {51.4779, -0.0015}
+  @elsewhere {51.5537, -0.0708}
 
   setup do
     Merlin.Config.put(%{
@@ -88,10 +88,10 @@ defmodule Merlin.GeofenceProcessTest do
       assert zone(paths) == :home
     end
 
-    test "a position outside every zone is :unknown", %{id: id, paths: paths} do
+    test "a position outside every zone is :away", %{id: id, paths: paths} do
       start_fence(id, paths)
-      observe(paths, @work, 5)
-      assert zone(paths) == :unknown
+      observe(paths, @elsewhere, 5)
+      assert zone(paths) == :away
     end
 
     # The accuracy gate, judged on the fix that carries it rather than on the
@@ -145,8 +145,8 @@ defmodule Merlin.GeofenceProcessTest do
     test "new coordinates are not paired with a stale accuracy", %{id: id, paths: paths} do
       start_fence(id, paths)
 
-      observe(paths, @work, 5)
-      assert zone(paths) == :unknown
+      observe(paths, @elsewhere, 5)
+      assert zone(paths) == :away
 
       # The accuracy on record is now demonstrably from an earlier fix.
       Process.sleep(Derive.Geofence.coherence_ms() + 100)
@@ -162,6 +162,8 @@ defmodule Merlin.GeofenceProcessTest do
       # And when it does arrive, it is the one that decides.
       World.put(paths.accuracy, 500)
       settle()
+
+      # :unknown, not :away -- there is no usable fix at all now.
       assert zone(paths) == :unknown
     end
 
@@ -169,12 +171,12 @@ defmodule Merlin.GeofenceProcessTest do
       start_fence(id, paths)
 
       # Somewhere far away, sharing home's longitude.
-      World.put(paths.lat, 36.5000)
+      World.put(paths.lat, 43.5000)
       World.put(paths.lon, elem(@home, 1))
       World.put(paths.accuracy, 5)
       settle()
 
-      assert zone(paths) == :unknown
+      assert zone(paths) == :away
 
       # Only the latitude updates, and only much later. Pairing it with the
       # old longitude would put the phone exactly at home.
@@ -199,7 +201,7 @@ defmodule Merlin.GeofenceProcessTest do
       assert zone(paths) == :home
 
       Process.sleep(Derive.Geofence.coherence_ms() + 100)
-      World.put(paths.lat, 36.5000)
+      World.put(paths.lat, 43.5000)
       settle()
 
       assert zone(paths) == :home,
@@ -213,16 +215,16 @@ defmodule Merlin.GeofenceProcessTest do
       assert zone(paths) == :home
 
       Process.sleep(Derive.Geofence.coherence_ms() + 100)
-      World.put(paths.lat, elem(@work, 0))
+      World.put(paths.lat, elem(@elsewhere, 0))
       settle()
       # Held.
       assert zone(paths) == :home
 
-      World.put(paths.lon, elem(@work, 1))
+      World.put(paths.lon, elem(@elsewhere, 1))
       World.put(paths.accuracy, 5)
       settle()
 
-      assert zone(paths) == :unknown,
+      assert zone(paths) == :away,
              "once the whole observation arrived the zone did not update"
     end
   end
@@ -240,7 +242,7 @@ defmodule Merlin.GeofenceProcessTest do
       assert zone(paths) == :home
 
       Process.sleep(Derive.Geofence.coherence_ms() + 100)
-      World.put(paths.lat, 36.5000)
+      World.put(paths.lat, 43.5000)
       settle()
 
       assert zone(paths) == :home, "a two-component observation was crossed"
