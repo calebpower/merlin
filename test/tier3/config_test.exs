@@ -300,6 +300,57 @@ defmodule Merlin.ConfigSourceTest do
              "a door moving while home would alert"
     end
 
+    # Stronger than "does not fire": the fact must SAY it does not know.
+    #
+    # A rule reading `false` cannot tell "we checked and the car is fine" from
+    # "the tracker is dark". Both suppress the alert, so a behavioural test
+    # alone passes either way -- which is exactly why the mutation check
+    # survived until this assertion existed. The dashboard at M9 will render
+    # this value, and rendering "no" for "no idea" is how a display lies.
+    test "away_while_home? reads :unknown on a dark tracker, not false", %{raw: raw} do
+      spec = Enum.find(Map.get(raw, :derived, []), &(Map.get(&1, :id) == :vehicle_away_while_home))
+      {:ok, expr} = Merlin.Expr.compile(spec.compute)
+
+      dark =
+        env_with(%{
+          [:person, :caleb, :zone] => :home,
+          [:vehicle, :car, :zone] => :unknown
+        })
+
+      assert Merlin.Expr.eval(expr, dark) == :unknown,
+             "the daemon claimed to know the car was not away while the tracker was dark"
+
+      # And it still answers plainly when it can see the car.
+      seen =
+        env_with(%{
+          [:person, :caleb, :zone] => :home,
+          [:vehicle, :car, :zone] => :away
+        })
+
+      assert Merlin.Expr.eval(expr, seen) == true
+
+      home =
+        env_with(%{
+          [:person, :caleb, :zone] => :home,
+          [:vehicle, :car, :zone] => :home
+        })
+
+      assert Merlin.Expr.eval(expr, home) == false
+    end
+
+    test "unaccounted? reads :unknown on a dark tracker too", %{raw: raw} do
+      spec = Enum.find(Map.get(raw, :derived, []), &(Map.get(&1, :id) == :vehicle_unaccounted))
+      {:ok, expr} = Merlin.Expr.compile(spec.compute)
+
+      dark =
+        env_with(%{
+          [:vehicle, :car, :zone] => :unknown,
+          [:vehicle, :car, :with_phone?] => false
+        })
+
+      assert Merlin.Expr.eval(expr, dark) == :unknown
+    end
+
     test "the vehicle rules do not fire on a dead tracker", %{raw: raw} do
       # `unknown?(zone)` used to mean "unaccounted for", so a tracker outage
       # read as a possible theft. Both rules must now decline on :unknown.
