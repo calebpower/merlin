@@ -219,7 +219,11 @@
         %{path: [:person, :owner, :lat], from: [["gps_latitude"]]},
         %{path: [:person, :owner, :lon], from: [["gps_longitude"]]},
         %{path: [:person, :owner, :accuracy_m], from: [["gps_accuracy"]]},
-        %{path: [:person, :owner, :battery_pct], from: [["battery_level"]]}
+        # `batt_level`, which is what the device sends. `battery_level` was a
+        # transcription and never matched anything.
+        %{path: [:person, :owner, :battery_pct], from: [["batt_level"]]},
+        %{path: [:person, :owner, :altitude_m], from: [["gps_altitude"]]},
+        %{path: [:person, :owner, :speed], from: [["gps_speed"]]}
       ]
     },
 

@@ -338,4 +338,87 @@ defmodule Merlin.HTTP.SnitchTest do
       assert log =~ "merlin-key list"
     end
   end
+
+  describe "the key may travel in a header, with the body as the payload" do
+    # The better shape, and the one that should have been original. A
+    # credential in the body forces the body into merlin's envelope, so the
+    # DEVICE has to be reconfigured to merlin -- and a device is usually the
+    # thing you cannot change or test. With the key in a header the body is
+    # whatever the device natively sends, injected verbatim.
+    defp post_with(body, headers) do
+      Enum.reduce(headers, conn(:post, "/snitch", body), fn {k, v}, c ->
+        put_req_header(c, k, v)
+      end)
+      |> put_req_header("content-type", "application/json")
+      |> @router.call(@opts)
+    end
+
+    test "x-api-key with a raw body injects the body verbatim", %{key: key} do
+      body = ~s({"gps_latitude":51.4779,"gps_longitude":-0.0015,"batt_level":88})
+
+      assert %{status: 200} = post_with(body, [{"x-api-key", key}])
+
+      assert_receive {:injected, "http/mobile/ariia/state", payload, opts}
+      assert payload == body, "the body was rewrapped rather than passed through"
+      assert {:http, id} = opts[:source]
+      assert is_integer(id)
+    end
+
+    test "authorization: Bearer works too", %{key: key} do
+      body = ~s({"gps_latitude":51.5})
+      assert %{status: 200} = post_with(body, [{"authorization", "Bearer " <> key}])
+      assert_receive {:injected, "http/mobile/ariia/state", ^body, _}
+    end
+
+    test "a bad header key injects nothing and is reported by prefix" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      bad = "not-a-real-key-at-all-0123456789"
+
+      log =
+        capture_log(fn ->
+          assert %{status: 200} = post_with(~s({"gps_latitude":1.0}), [{"x-api-key", bad}])
+        end)
+
+      refute_receive {:injected, _, _, _}, 50
+      assert log =~ "from the header is not"
+      assert log =~ "not-a-re"
+      refute log =~ bad, "the full key reached the log"
+    end
+
+    # The envelope must keep working: things already use it.
+    test "the challenge/status envelope still works", %{key: key} do
+      assert %{status: 200} =
+               post_with(~s({"challenge":"#{key}","status":{"gps_latitude":51.4}}), [])
+
+      assert_receive {:injected, "http/mobile/ariia/state", payload, _}
+      assert Jason.decode!(payload) == %{"gps_latitude" => 51.4}
+    end
+
+    # An empty header must not count as a credential, or it silently bypasses
+    # the envelope path and every such request is dropped with a confusing
+    # reason.
+    test "an empty x-api-key falls through to the envelope" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        capture_log(fn ->
+          post_with(~s({"gps_latitude":1.0}), [{"x-api-key", ""}])
+        end)
+
+      assert log =~ "no `challenge` field"
+      refute_receive {:injected, _, _, _}, 50
+    end
+
+    # A header key must still be scoped to its own topic.
+    test "a header key cannot write outside the topic it resolves to", %{key: key} do
+      assert %{status: 200} = post_with(~s({"a":1}), [{"x-api-key", key}])
+      assert_receive {:injected, topic, _, _}
+      assert topic == "http/mobile/ariia/state"
+    end
+  end
 end
