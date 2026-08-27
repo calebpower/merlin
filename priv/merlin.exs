@@ -282,20 +282,19 @@
     },
 
     # --- weather (weather.py) -----------------------------------------------
-    # Kept, and now with a consumer: the sun fact decides "after dark", and
-    # this will feed the dashboard at M9. In the Python SNS_EXT_CLIMATE_TEMP
-    # had no reader at all.
-    %{
-      id: :weather,
-      kind: :http_poll,
-      every: {5, :minute},
-      request: [
-        url: {:secret, :weather_endpoint},
-        params: %{"key" => {:secret, :weather_api_key}}
-      ],
-      stale_after_ms: 1_800_000,
-      facts: [%{path: [:weather, :exterior, :temp_f], from: ["temp"]}]
-    },
+    # NOT CONFIGURED, and deliberately absent rather than present-and-broken.
+    #
+    # The Python has `runners/weather.py` in the tree and no weather entry in
+    # config.toml at all -- no endpoint, no key, no runner block. It has never
+    # run. Porting it because the file existed was reading the code and not the
+    # configuration, which is the same mistake that put this house's zones in
+    # the wrong state.
+    #
+    # Shipping the poller anyway would mean referencing secrets that do not
+    # exist, and preflight would rightly refuse to start the daemon. To enable
+    # it: add weather_endpoint and weather_api_key to merlin.secrets.exs and
+    # restore an :http_poll entry here. Merlin.Source.HttpPoll needs no changes
+    # and tier 5 already covers it.
 
     # --- the geofences ------------------------------------------------------
     # Modules, because this is geometry. Zone definitions are data, because

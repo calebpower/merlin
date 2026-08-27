@@ -51,8 +51,6 @@ cat > "$MERLIN_SECRETS" <<'SECRETS'
   hapn_device_endpoint: "http://127.0.0.1:1/device",
   hapn_client_id: "smoke",
   hapn_client_secret: "smoke",
-  weather_endpoint: "http://127.0.0.1:1/weather",
-  weather_api_key: "smoke",
   discord_webhook: "http://127.0.0.1:1/webhook"
 }
 SECRETS
@@ -519,15 +517,30 @@ say "checking a dead poller endpoint degrades rather than escalating"
 
 poll_log=$(find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec cat {} + 2>/dev/null)
 
-# EVERY poller, by name. The first version of this check looked for one
-# "poll failed" line anywhere and passed -- while the weather poller was in a
+# EVERY configured poller, by name. The first version of this check looked for
+# one "poll failed" line anywhere and passed -- while a second poller was in a
 # crash loop that shut the daemon down ninety seconds later. One healthy
-# integration masked a fatal one.
-for poller in hapn weather; do
+# integration masked a fatal one, which is why this enumerates rather than
+# searching.
+#
+# The list is derived from the config, not hardcoded, so removing or adding a
+# poller cannot silently narrow what this asserts.
+pollers=$("$REL/bin/merlin" rpc '
+  Merlin.Config.loaded()
+  |> Map.get(:derived, [])
+  |> Enum.filter(&(Map.get(&1, :kind) == :http_poll))
+  |> Enum.map_join(" ", &to_string(&1.id))
+  |> IO.puts()
+' 2>>"$REAPER_OUT/smoke-rpc.err" | tail -1)
+
+[ -n "$pollers" ] || die "the daemon reports no http pollers at all; this check would be vacuous"
+say "configured pollers: $pollers"
+
+for poller in $pollers; do
     printf '%s\n' "$poll_log" | grep -q "$poller: poll failed" \
         || die "$poller never reported a failure -- it either did not poll, or it died instead"
 done
-say "both pollers reported their failure by name"
+say "every configured poller reported its failure by name"
 
 # The settle window's log evidence, checked here rather than at boot because
 # by now the console buffer has certainly flushed. A window that suppresses
