@@ -371,7 +371,7 @@ MERLIN_SMOKE_KEY="$API_KEY" MERLIN_SMOKE_PORT="$MERLIN_PUBLIC_PORT" \
   body =
     Jason.encode!(%{
       challenge: key,
-      status: %{gps_latitude: 35.9606, gps_longitude: -83.9207, gps_accuracy: 12}
+      status: %{gps_latitude: 51.4779, gps_longitude: -0.0015, gps_accuracy: 12}
     })
 
   url = ~c"http://127.0.0.1:#{port}/snitch"
@@ -394,7 +394,7 @@ while [ "$i" -lt 20 ]; do
 done
 
 case "$lat" in
-    *35.9606*) say "/snitch with a live-minted key produced person.caleb.lat = $lat" ;;
+    *51.4779*) say "/snitch with a live-minted key produced person.caleb.lat = $lat" ;;
     *) tail -20 "$rpc_err" 2>/dev/null; die "the key did not inject a fact (lat=$lat)" ;;
 esac
 
@@ -407,9 +407,10 @@ esac
 # False was meant and every consumer tested `is False`, so being outside every
 # zone was indistinguishable from being home and the away path never ran.
 # ---------------------------------------------------------------------------
+# post_position <lat> <lon> [accuracy_m]
 post_position() {
     MERLIN_SMOKE_KEY="$API_KEY" MERLIN_SMOKE_PORT="$MERLIN_PUBLIC_PORT" \
-    MERLIN_SMOKE_LAT="$1" MERLIN_SMOKE_LON="$2" \
+    MERLIN_SMOKE_LAT="$1" MERLIN_SMOKE_LON="$2" MERLIN_SMOKE_ACC="${3:-8}" \
     "$REL/bin/merlin" eval '
       :inets.start()
       body = Jason.encode!(%{
@@ -417,7 +418,7 @@ post_position() {
         status: %{
           gps_latitude: String.to_float(System.get_env("MERLIN_SMOKE_LAT")),
           gps_longitude: String.to_float(System.get_env("MERLIN_SMOKE_LON")),
-          gps_accuracy: 8
+          gps_accuracy: String.to_integer(System.get_env("MERLIN_SMOKE_ACC"))
         }
       })
       url = ~c"http://127.0.0.1:#{System.get_env("MERLIN_SMOKE_PORT")}/snitch"
@@ -443,20 +444,33 @@ await_zone() {
 }
 
 say "posting a position at the centre of the home zone"
-post_position 35.9606 -83.9207
+post_position 51.4779 -0.0015
 await_zone ":home" || die "expected zone :home, got $(zone_now)"
 say "zone resolved to :home"
 
 say "posting a position far outside every zone"
 post_position 40.7128 -74.0060
-await_zone ":unknown" || die "expected zone :unknown, got $(zone_now)"
-say "zone resolved to :unknown -- NOT :home, and not false (bug 2 is fixed)"
+await_zone ":away" || die "expected zone :away, got $(zone_now)"
+say "zone resolved to :away -- NOT :home, and not false (bug 2 is fixed)"
+
+# The distinction that :away exists for. Same coordinates, a fix too vague to
+# place anyone: :unknown, not :away. Rules act on :away and decline on
+# :unknown, so if these two ever collapse back into one value the house either
+# stops reacting to being out or starts alarming on a lost phone.
+say "posting the same position with a fix too vague to use"
+post_position 40.7128 -74.0060 900
+await_zone ":unknown" || die "a 900m fix produced $(zone_now), not :unknown"
+say "vague fix resolved to :unknown -- distinct from :away"
+
+# And back, so the rest of the run starts from a known state.
+post_position 40.7128 -74.0060
+await_zone ":away" || die "expected zone :away, got $(zone_now)"
 
 say "posting a position just outside the entry radius but inside the exit radius"
 # ~130m north of home: beyond the 400ft entry radius, within the 1.25x exit
 # radius. Coming from :unknown, hysteresis must keep us OUT.
-post_position 35.9617 -83.9207
-await_zone ":unknown" || die "hysteresis let us enter on the exit radius (got $(zone_now))"
+post_position 51.4819417 -0.0015
+await_zone ":away" || die "hysteresis let us enter on the exit radius (got $(zone_now))"
 say "hysteresis held: did not enter on the wider radius"
 
 # --------------------------------------------------------------------------
@@ -666,10 +680,10 @@ restart_out="$REAPER_OUT/smoke-restart-key.txt"
 API_KEY=$(sed -n 's/.*[Kk]ey: *//p' "$restart_out" | tail -1)
 [ -n "$API_KEY" ] || { cat "$restart_out"; die "no key in merlin-key add output"; }
 
-# At work: 35.9132,-84.3110 is the centre of the work zone.
+# At the workshop, which is the only away-zone this house declares.
 say "posting a position at work"
-post_position 35.9132 -84.3110
-await_zone ":work" || die "expected zone :work, got $(zone_now)"
+post_position 51.5537 -0.0708
+await_zone ":workshop" || die "expected zone :workshop, got $(zone_now)"
 
 latch_now() {
     "$REL/bin/merlin" rpc \

@@ -208,6 +208,26 @@ defmodule Merlin.ConfigSourceTest do
       end
     end
 
+    test "the zones are the real house, not invented ones", %{config: config} do
+      # Guarding against the specific way this went wrong: coordinates that
+      # look plausible and are in the wrong state entirely. Massachusetts, not
+      # Tennessee. Every presence rule would have read :unknown for ever.
+      zones = config.zones
+
+      assert Map.has_key?(zones, :home), "no home zone"
+      assert Map.has_key?(zones, :workshop), "no hackspace zone"
+
+      for {id, zone} <- zones do
+        {lat, lon} = zone.center
+
+        assert lat > 42.0 and lat < 43.0,
+               "zone #{id} has latitude #{lat}, which is not near this house"
+
+        assert lon > -71.5 and lon < -70.5,
+               "zone #{id} has longitude #{lon}, which is not near this house"
+      end
+    end
+
     test "declares what survives a restart", %{config: config} do
       prefixes = Merlin.Config.persisted_prefixes(config)
 
@@ -232,6 +252,73 @@ defmodule Merlin.ConfigSourceTest do
       # system would report that it had silently stopped being one.
       latch = Enum.find(config.rules, &(&1.id == :intruder_latch))
       assert %Merlin.Machine{persist: true} = latch
+    end
+
+    # Behaviour, not text. These evaluate the expressions the shipped config
+    # actually contains against a world built to be the dangerous case, which
+    # is the only way to assert what a rule will not do. Checking the compute
+    # string would pass for a rule that says the right words and means
+    # something else.
+    defp env_with(facts) do
+      %{
+        read: fn path -> Map.get(facts, path, :unknown) end,
+        trigger: %{},
+        group: fn _ -> [] end,
+        locals: %{}
+      }
+    end
+
+    defp guards_of(%Merlin.Machine{states: states}, state) do
+      for %Merlin.Machine.Clause{guard: g} <- Map.fetch!(states, state), g != nil, do: g
+    end
+
+    test "the intruder latch does not fire when the phone is unlocatable", %{config: config} do
+      latch = Enum.find(config.rules, &(&1.id == :intruder_latch))
+      guards = guards_of(latch, :armed)
+      assert guards != [], "the armed state has no guard at all -- it would fire on any door"
+
+      for guard <- guards do
+        for zone <- [:unknown, nil] do
+          refute Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :caleb, :zone] => zone}))),
+                 "a door moving with the phone at #{inspect(zone)} would raise an intruder alert"
+        end
+      end
+    end
+
+    test "the intruder latch DOES fire when the phone is demonstrably out", %{config: config} do
+      # The other half. A guard that never fires satisfies the test above
+      # perfectly, and is exactly what the house had before :away existed.
+      latch = Enum.find(config.rules, &(&1.id == :intruder_latch))
+      [guard] = guards_of(latch, :armed)
+
+      for zone <- [:away, :workshop] do
+        assert Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :caleb, :zone] => zone}))),
+               "a door moving while at #{inspect(zone)} would NOT alert"
+      end
+
+      refute Merlin.Expr.truthy?(Merlin.Expr.eval(guard, env_with(%{[:person, :caleb, :zone] => :home}))),
+             "a door moving while home would alert"
+    end
+
+    test "the vehicle rules do not fire on a dead tracker", %{raw: raw} do
+      # `unknown?(zone)` used to mean "unaccounted for", so a tracker outage
+      # read as a possible theft. Both rules must now decline on :unknown.
+      for id <- [:vehicle_unaccounted, :vehicle_away_while_home] do
+        spec = Enum.find(Map.get(raw, :derived, []), &(Map.get(&1, :id) == id))
+        assert spec, "#{id} is missing from the shipped config"
+
+        {:ok, expr} = Merlin.Expr.compile(spec.compute)
+
+        env =
+          env_with(%{
+            [:person, :caleb, :zone] => :home,
+            [:vehicle, :car, :zone] => :unknown,
+            [:vehicle, :car, :with_phone?] => false
+          })
+
+        refute Merlin.Expr.truthy?(Merlin.Expr.eval(expr, env)),
+               "#{id} fires on a tracker that has gone dark"
+      end
     end
 
     test "ships with dry_run enabled", %{config: config} do
@@ -453,6 +540,164 @@ defmodule Merlin.ConfigSourceTest do
       config = %{groups: [], rules: [], sources: [], persist: %{a: 1}}
       assert {:error, errors} = Config.File.validate(config)
       assert Enum.any?(errors, &match?({:persist_not_a_list, _}, &1))
+    end
+
+    # The defect that shipped through M7 and would have shipped to production:
+    # the intruder latch compared against :work and :gym, zones this house has
+    # never had. It compiles, it loads, it is never true, and nothing anywhere
+    # says so.
+    test "a guard comparing against an undeclared zone is refused" do
+      config = %{
+        groups: [],
+        sources: [],
+        zones: [%{id: :home, center: {42.0, -71.0}, radius: {0.25, :mi}}],
+        rules: [
+          %{
+            id: :bad,
+            desc: "d",
+            on: [{:changes, [:x]}],
+            when: "person.caleb.zone == :work",
+            do: [{:log, :info, "x"}]
+          }
+        ]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert Enum.any?(errors, &match?({:unknown_zone, :bad, :work, _}, &1))
+      assert Config.File.format_errors(errors) =~ "never be true"
+    end
+
+    test "a declared zone is accepted" do
+      config = %{
+        groups: [],
+        sources: [],
+        zones: [%{id: :home, center: {42.0, -71.0}, radius: {0.25, :mi}}],
+        rules: [
+          %{
+            id: :ok_rule,
+            desc: "d",
+            on: [{:changes, [:x]}],
+            when: "person.caleb.zone == :home",
+            do: [{:log, :info, "x"}]
+          }
+        ]
+      }
+
+      assert {:ok, _} = Config.File.validate(config)
+    end
+
+    test "comparing a zone against :unknown is refused by the compiler" do
+      # Not a zone check -- the expression compiler rejects it before the zone
+      # validator ever sees it, because `!= :unknown` is permanently :unknown
+      # and would disable the rule silently.
+      config = %{
+        groups: [],
+        sources: [],
+        zones: [%{id: :home, center: {42.0, -71.0}, radius: {0.25, :mi}}],
+        rules: [
+          %{
+            id: :ok_rule,
+            desc: "d",
+            on: [{:changes, [:x]}],
+            when: "person.caleb.zone != :unknown",
+            do: [{:log, :info, "x"}]
+          }
+        ]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+
+      assert Enum.any?(errors, fn
+               {_id, {:bad_guard, _, {:unknown_literal_comparison, _, _}}} -> true
+               _ -> false
+             end),
+             "the config loaded with a guard that can never be true"
+    end
+
+    test ":away IS a legal zone comparison" do
+      # It is a real answer the geofence gives, not a marker for absence.
+      config = %{
+        groups: [],
+        sources: [],
+        zones: [%{id: :home, center: {42.0, -71.0}, radius: {0.25, :mi}}],
+        rules: [
+          %{
+            id: :ok_rule,
+            desc: "d",
+            on: [{:changes, [:x]}],
+            when: "person.caleb.zone == :away",
+            do: [{:log, :info, "x"}]
+          }
+        ]
+      }
+
+      assert {:ok, _} = Config.File.validate(config)
+    end
+
+    test "a machine clause guard is checked too" do
+      # The latch IS a machine, so checking only stateless rules would have
+      # missed the actual defect.
+      config = %{
+        groups: [],
+        sources: [],
+        zones: [%{id: :home, center: {42.0, -71.0}, radius: {0.25, :mi}}],
+        rules: [
+          %{
+            id: :bad_machine,
+            desc: "d",
+            machine: %{
+              initial: :a,
+              states: %{
+                a: [%{on: {:changes, [:x]}, when: "person.caleb.zone == :gym", goto: :a}]
+              }
+            }
+          }
+        ]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert Enum.any?(errors, &match?({:unknown_zone, :bad_machine, :gym, _}, &1))
+    end
+
+    test "an undeclared zone inside an `in` list is refused too" do
+      config = %{
+        groups: [],
+        sources: [],
+        zones: [%{id: :home, center: {42.0, -71.0}, radius: {0.25, :mi}}],
+        rules: [
+          %{
+            id: :bad_list,
+            desc: "d",
+            on: [{:changes, [:x]}],
+            when: "person.caleb.zone in [:home, :atlantis]",
+            do: [{:log, :info, "x"}]
+          }
+        ]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert Enum.any?(errors, &match?({:unknown_zone, :bad_list, :atlantis, _}, &1))
+      refute Enum.any?(errors, &match?({:unknown_zone, _, :home, _}, &1))
+    end
+
+    test "a non-zone fact compared against an atom is not checked" do
+      # `printer.state == :idle` must not be measured against the zone list.
+      config = %{
+        groups: [],
+        sources: [],
+        zones: [%{id: :home, center: {42.0, -71.0}, radius: {0.25, :mi}}],
+        rules: [
+          %{
+            id: :ok_rule,
+            desc: "d",
+            on: [{:changes, [:x]}],
+            when: "printer.kobra_neo.job == :printing",
+            do: [{:log, :info, "x"}]
+          }
+        ]
+      }
+
+      assert {:ok, _} = Config.File.validate(config)
     end
 
     test "a missing file is an error, not an empty config" do

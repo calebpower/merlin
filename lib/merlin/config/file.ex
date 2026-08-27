@@ -110,7 +110,9 @@ defmodule Merlin.Config.File do
       {[], {:ok, rules}} ->
         group_ids = term |> Map.get(:groups, []) |> MapSet.new(& &1.id)
 
-        case rule_reference_errors(rules, group_ids) do
+        zone_ids = term |> Map.get(:zones, []) |> MapSet.new(& &1[:id])
+
+        case rule_reference_errors(rules, group_ids) ++ zone_errors(term, rules, zone_ids) do
           [] -> {:ok, build(term, rules)}
           refs -> {:error, refs}
         end
@@ -431,6 +433,55 @@ defmodule Merlin.Config.File do
   # inside each clause of each state. Both must be checked, or a typo'd group
   # name inside a machine would be a silent no-op at 3am instead of a boot
   # failure -- which is the whole reason this check exists.
+  # Every zone a guard compares against must be a zone this house has.
+  #
+  # `person.caleb.zone == :work` compiles, loads and is simply never true when
+  # no `:work` zone is declared. The rule then does nothing for ever, and the
+  # house looks quiet rather than broken -- there is no error, no warning, and
+  # nothing in any log to notice.
+  #
+  # The configuration shipped through M7 compared against `:work` and `:gym`
+  # in the intruder latch, and this house has only ever had `home` and
+  # `hackspace`. The whole presence half of the automation would have been
+  # inert, and the dry-run soak would have shown a reassuring silence.
+  defp zone_errors(term, rules, zone_ids) do
+    from_rules =
+      Enum.flat_map(rules, fn rule ->
+        rule
+        |> all_guards()
+        |> Enum.flat_map(&Merlin.Expr.zone_atoms/1)
+        |> Enum.map(&{rule.id, &1})
+      end)
+
+    from_derived =
+      term
+      |> Map.get(:derived, [])
+      |> Enum.filter(&(is_map(&1) and Map.get(&1, :kind) == :expr))
+      |> Enum.flat_map(fn d ->
+        case Merlin.Expr.compile(Map.get(d, :compute, "")) do
+          {:ok, expr} -> expr |> Merlin.Expr.zone_atoms() |> Enum.map(&{d.id, &1})
+          {:error, _} -> []
+        end
+      end)
+
+    (from_rules ++ from_derived)
+    |> Enum.reject(fn {_where, zone} -> MapSet.member?(zone_ids, zone) end)
+    |> Enum.uniq()
+    |> Enum.map(fn {where, zone} ->
+      {:unknown_zone, where, zone, Enum.sort(MapSet.to_list(zone_ids))}
+    end)
+  end
+
+  defp all_guards(%Merlin.Rule{guard: nil}), do: []
+  defp all_guards(%Merlin.Rule{guard: guard}), do: [guard]
+
+  defp all_guards(%Merlin.Machine{states: states}) do
+    for {_state, clauses} <- states,
+        %Merlin.Machine.Clause{guard: guard} <- clauses,
+        guard != nil,
+        do: guard
+  end
+
   defp all_actions(%Merlin.Rule{actions: actions}), do: actions
 
   defp all_actions(%Merlin.Machine{states: states}) do
@@ -489,6 +540,12 @@ defmodule Merlin.Config.File do
 
   defp describe({:duplicate_producer, path, ids}),
     do: "#{path} is written by more than one derived fact: #{Enum.map_join(ids, ", ", &inspect/1)}"
+
+  defp describe({:unknown_zone, where, zone, declared}),
+    do:
+      "#{inspect(where)} compares a zone against #{inspect(zone)}, which this house does " <>
+        "not declare. It would never be true and the rule would never fire. " <>
+        "Declared zones: #{Enum.map_join(declared, ", ", &inspect/1)}"
 
   defp describe({:missing_file, path}), do: "config file not found: #{path}"
   defp describe({:eval_failed, path, message}), do: "could not evaluate #{path}: #{message}"

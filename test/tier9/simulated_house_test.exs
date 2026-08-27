@@ -123,6 +123,36 @@ defmodule Merlin.SimulatedHouseTest do
       assert Invariants.latch_never_fires_at_home(clean) == []
     end
 
+    test "latch_never_fires_on_a_lost_phone catches an alarm with no fix" do
+      broken = [
+        entry(1, facts: %{[:rule, :intruder_latch, :state] => :armed}),
+        entry(2,
+          facts: %{
+            [:rule, :intruder_latch, :state] => :fired,
+            [:person, :caleb, :zone] => :unknown
+          }
+        )
+      ]
+
+      assert [msg] = Invariants.latch_never_fires_on_a_lost_phone(broken)
+      assert msg =~ ":unknown"
+    end
+
+    test "latch_never_fires_on_a_lost_phone permits an alarm when away" do
+      # The whole point of :away being separate: this one MUST alarm.
+      clean = [
+        entry(1, facts: %{[:rule, :intruder_latch, :state] => :armed}),
+        entry(2,
+          facts: %{
+            [:rule, :intruder_latch, :state] => :fired,
+            [:person, :caleb, :zone] => :away
+          }
+        )
+      ]
+
+      assert Invariants.latch_never_fires_on_a_lost_phone(clean) == []
+    end
+
     test "latch_stays_fired_until_home catches a latch that forgets" do
       broken = [
         entry(1,
@@ -222,6 +252,7 @@ defmodule Merlin.SimulatedHouseTest do
         MapSet.new([
           :ac_off_for_the_whole_cycle,
           :latch_never_fires_at_home,
+          :latch_never_fires_on_a_lost_phone,
           :latch_stays_fired_until_home,
           :nothing_published_while_settling,
           :lamps_never_commanded_in_daylight,
@@ -256,15 +287,15 @@ defmodule Merlin.SimulatedHouseTest do
   # Exterior and interior, because only exterior doors alarm.
   @rooms ["garage", "front", "back", "bedroom"]
 
+  # The real geometry, from the house rather than from imagination.
   @zones %{
-    home: {35.9606, -83.9207},
-    work: {35.9132, -84.3110},
-    gym: {35.9401, -83.9951},
+    home: {51.4779, -0.0015},
+    hackspace: {51.5537, -0.0708},
     # Just outside home's entry radius but inside its exit radius: the case
     # hysteresis exists for, and the one a phone with poor accuracy sits on
     # for hours.
-    boundary: {35.9617, -83.9207},
-    away: {36.5000, -84.5000}
+    boundary: {51.4819417, -0.0015},
+    away: {43.0000, -71.5000}
   }
 
   defp seed do

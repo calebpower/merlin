@@ -411,4 +411,88 @@ defmodule Merlin.ExprTest do
       assert {:ok, _} = Expr.compile("person.caleb.zone")
     end
   end
+
+  describe "comparing against the literal :unknown" do
+    # The trap: every operator propagates :unknown, so `x != :unknown` is
+    # ALWAYS :unknown and a guard written that way never fires. It reads
+    # perfectly, compiles, loads, and silently disables the rule -- which is
+    # exactly what it did to the intruder latch.
+    test "== :unknown is refused, and says what to use instead" do
+      assert {:error, {:unknown_literal_comparison, _, msg}} =
+               Expr.compile("person.caleb.zone == :unknown")
+
+      assert msg =~ "unknown?(x)"
+      assert msg =~ "never be true"
+    end
+
+    test "!= :unknown is refused, and points at defined?" do
+      assert {:error, {:unknown_literal_comparison, _, msg}} =
+               Expr.compile("person.caleb.zone != :unknown")
+
+      assert msg =~ "defined?(x)"
+    end
+
+    test "refused on either side of the operator" do
+      assert {:error, {:unknown_literal_comparison, _, _}} =
+               Expr.compile(":unknown == person.caleb.zone")
+    end
+
+    test "refused inside a larger expression" do
+      # Where it actually appeared: a conjunction whose other half is fine.
+      assert {:error, {:unknown_literal_comparison, _, _}} =
+               Expr.compile("person.caleb.zone != :home and person.caleb.zone != :unknown")
+    end
+
+    # The replacements must work, or the refusal is just an obstruction.
+    test "defined? and unknown? do what the refused form was reaching for" do
+      env = %{read: fn _ -> :unknown end, trigger: %{}, locals: %{}, group: fn _ -> [] end}
+      known = %{read: fn _ -> :workshop end, trigger: %{}, locals: %{}, group: fn _ -> [] end}
+
+      {:ok, is_def} = Expr.compile("defined?(person.caleb.zone)")
+      {:ok, is_unk} = Expr.compile("unknown?(person.caleb.zone)")
+
+      assert Expr.eval(is_def, env) == false
+      assert Expr.eval(is_unk, env) == true
+      assert Expr.eval(is_def, known) == true
+      assert Expr.eval(is_unk, known) == false
+    end
+
+    test "the guard the latch actually uses fires when out and declines when lost" do
+      {:ok, guard} = Expr.compile("defined?(person.caleb.zone) and person.caleb.zone != :home")
+
+      env = fn zone ->
+        %{read: fn _ -> zone end, trigger: %{}, locals: %{}, group: fn _ -> [] end}
+      end
+
+      assert Expr.truthy?(Expr.eval(guard, env.(:away))), "would not alert while out"
+      assert Expr.truthy?(Expr.eval(guard, env.(:workshop))), "would not alert at the workshop"
+      refute Expr.truthy?(Expr.eval(guard, env.(:home))), "would alert while home"
+      refute Expr.truthy?(Expr.eval(guard, env.(:unknown))), "would alert with no fix"
+    end
+
+    test "an `in` list containing :unknown is refused for the same reason" do
+      # Less visible than `==` and identically broken: if x IS :unknown the
+      # propagation answers :unknown, so the membership test can never be true
+      # for the one value it was written to catch.
+      assert {:error, {:unknown_literal_comparison, _, _}} =
+               Expr.compile("person.caleb.zone in [:home, :unknown]")
+    end
+
+    test "an `in` list of ordinary atoms still compiles and works" do
+      {:ok, expr} = Expr.compile("person.caleb.zone in [:home, :workshop]")
+
+      env = fn zone ->
+        %{read: fn _ -> zone end, trigger: %{}, locals: %{}, group: fn _ -> [] end}
+      end
+
+      assert Expr.eval(expr, env.(:home)) == true
+      assert Expr.eval(expr, env.(:away)) == false
+    end
+
+    # Comparing against other atoms is untouched.
+    test "comparing against ordinary atoms still compiles" do
+      assert {:ok, _} = Expr.compile("person.caleb.zone == :home")
+      assert {:ok, _} = Expr.compile("person.caleb.zone != :away")
+    end
+  end
 end

@@ -60,15 +60,24 @@ defmodule Merlin.Zones do
   The zone containing `point`, given what zone the subject was in previously.
 
   `previous` widens only its own zone's radius, so leaving requires travelling
-  further than arriving did. Returns a zone id or `:unknown`.
+  further than arriving did.
 
-  `:unknown` rather than `nil`, deliberately: it is the same value a stale or
-  absent position produces, and it propagates through the expression language
-  as "we do not know" rather than as "not home". That distinction is the whole
-  point of the tri-state.
+  Three kinds of answer, and the difference between the last two matters more
+  than it looks:
+
+    * a **zone id** -- inside that named circle;
+    * **`:away`** -- we have a usable fix and it is not inside any of them;
+    * **`:unknown`** -- no fix good enough to place anyone: stale, absent, or
+      too vague.
+
+  `:unknown` propagates through the expression language as "we do not know",
+  and rules decline to act on it. `:away` is a positive statement and rules
+  act on it freely. Collapsing the two -- which this did until the deployment
+  survey -- means every rule about being out declines for ever, because
+  "somewhere unnamed" is where you usually are.
   """
   @spec resolve(Geo.point() | :unknown, atom() | :unknown, %{atom() => zone()}) ::
-          atom() | :unknown
+          atom() | :away | :unknown
   def resolve(:unknown, _previous, _zones), do: :unknown
 
   def resolve({lat, lon}, previous, zones)
@@ -82,7 +91,23 @@ defmodule Merlin.Zones do
     |> Enum.filter(fn {_id, distance, radius} -> distance <= radius end)
     |> case do
       [] ->
-        :unknown
+        # `:away`, not `:unknown`.
+        #
+        # We have a usable fix and it is not inside anything named. That is a
+        # different claim from "we do not know where the phone is", and
+        # collapsing them into one value is why the house could not tell "he
+        # is at the supermarket" from "his phone is off".
+        #
+        # The consequence was that both the intruder latch and the
+        # lights-off-when-away rule only worked when the phone happened to be
+        # inside the one other named zone. Everywhere else read :unknown, and
+        # rules correctly decline to act on :unknown -- so they declined
+        # essentially always.
+        #
+        # :unknown now means exactly one thing: no fix good enough to place
+        # anyone. It is produced by the clauses either side of this one, never
+        # by a position that simply is not in a circle.
+        :away
 
       containing ->
         # Nearest wins; ties break toward the TIGHTER zone. Distance alone is

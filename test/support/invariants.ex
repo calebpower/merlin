@@ -46,6 +46,7 @@ defmodule Merlin.Test.Invariants do
     [
       {:ac_off_for_the_whole_cycle, &ac_off_for_the_whole_cycle/1},
       {:latch_never_fires_at_home, &latch_never_fires_at_home/1},
+      {:latch_never_fires_on_a_lost_phone, &latch_never_fires_on_a_lost_phone/1},
       {:nothing_published_while_settling, &nothing_published_while_settling/1},
       {:latch_stays_fired_until_home, &latch_stays_fired_until_home/1},
       {:lamps_never_commanded_in_daylight, &lamps_never_commanded_in_daylight/1},
@@ -120,6 +121,34 @@ defmodule Merlin.Test.Invariants do
 
       if from != :fired and to == :fired and zone == :home do
         ["the latch fired at seq #{entry.seq} while the phone was home"]
+      else
+        []
+      end
+    end)
+  end
+
+  @doc """
+  The latch must never fire while the phone's location is unknown.
+
+  This is the safety property the whole `:away` / `:unknown` split exists to
+  protect. `:unknown` means merlin has no usable fix -- the phone is off, the
+  battery died, GPS is reporting a two-kilometre error. A door moving then is
+  not evidence of anything, and alarming on it is how a home alarm teaches you
+  to ignore it.
+
+  Before the split there was one value for "somewhere unnamed" and "no fix", so
+  excluding one excluded both. Now that they are separable, the exclusion has
+  to be asserted or it can be dropped from a guard with nothing noticing.
+  """
+  @spec latch_never_fires_on_a_lost_phone(timeline()) :: [binary()]
+  def latch_never_fires_on_a_lost_phone(timeline) do
+    timeline
+    |> transitions([:rule, :intruder_latch, :state])
+    |> Enum.flat_map(fn {entry, from, to} ->
+      zone = Map.get(entry.facts, [:person, :caleb, :zone], :absent)
+
+      if from != :fired and to == :fired and zone in [:unknown, :absent] do
+        ["the latch fired at seq #{entry.seq} with the phone's location #{inspect(zone)}"]
       else
         []
       end
