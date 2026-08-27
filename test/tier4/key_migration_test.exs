@@ -140,6 +140,70 @@ defmodule Merlin.KeyMigrationTest do
       end)
     end
 
+    # The deployment produced a write failure by creating the database as the
+    # wrong user, and it surfaced as a CaseClauseError naming an anonymous
+    # function three frames deep -- which says nothing about the permissions
+    # problem the operator actually has, at the moment they are least able to
+    # guess.
+    #
+    # NOT tested through file permissions: this suite runs as root in the
+    # reaper guest, and root writes a 0444 file happily, so a chmod-based test
+    # passes for the wrong reason. A NOT NULL violation is a real SQLite
+    # write error that no amount of privilege bypasses -- and it is realistic,
+    # being what a legacy row with a null topic produces.
+    # `INSERT OR IGNORE` is what makes a retried import safe, and it also
+    # swallows constraint violations silently. Counting successful statements
+    # therefore over-reported: a row with no topic was announced as imported.
+    # During a cutover that number is the entire basis for believing the phone
+    # still works.
+    test "a row that cannot land is not counted as imported", %{legacy: legacy, new: new} do
+      {:ok, db} = Sqlite3.open(legacy)
+      :ok = Sqlite3.execute(db, "CREATE TABLE API_Key (id INTEGER, topic TEXT, key TEXT)")
+      :ok = Sqlite3.execute(db, "INSERT INTO API_Key (topic, key) VALUES ('good/topic', 'k1')")
+      :ok = Sqlite3.execute(db, "INSERT INTO API_Key (topic, key) VALUES (NULL, 'k2')")
+      :ok = Sqlite3.close(db)
+
+      KeyStore.with_db(new, fn conn ->
+        assert {:ok, 1} = KeyStore.import_legacy(conn, legacy),
+               "a row with no topic was counted as imported"
+
+        assert KeyStore.count(conn) == 1
+        assert {:ok, "good/topic", _} = KeyStore.resolve(conn, "k1")
+      end)
+    end
+
+    test "a re-import reports zero rather than claiming to import again", %{
+      legacy: legacy,
+      new: new
+    } do
+      seed_legacy(legacy, [{"a/topic", "k1"}, {"b/topic", "k2"}])
+
+      KeyStore.with_db(new, fn conn ->
+        assert {:ok, 2} = KeyStore.import_legacy(conn, legacy)
+
+        assert {:ok, 0} = KeyStore.import_legacy(conn, legacy),
+               "a repeated import claimed to import keys that were already there"
+
+        assert KeyStore.count(conn) == 2
+      end)
+    end
+
+    # The symmetric clause on the read path, which is what pointing --from at
+    # the wrong SQLite file actually produces.
+    test "a read SQLite refuses says so plainly", %{legacy: legacy, new: new} do
+      {:ok, db} = Sqlite3.open(legacy)
+      :ok = Sqlite3.execute(db, "CREATE TABLE something_else (a TEXT)")
+      :ok = Sqlite3.close(db)
+
+      error =
+        assert_raise RuntimeError, fn ->
+          KeyStore.with_db(new, fn conn -> KeyStore.import_legacy(conn, legacy) end)
+        end
+
+      assert Exception.message(error) =~ "sqlite refused"
+      assert Exception.message(error) =~ "API_Key"
+    end
+
     test "a missing legacy database is an error, not a crash", %{dir: dir, new: new} do
       KeyStore.with_db(new, fn conn ->
         assert {:error, _} = KeyStore.import_legacy(conn, Path.join(dir, "nope.db"))

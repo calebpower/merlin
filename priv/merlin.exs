@@ -13,6 +13,11 @@
   # this file.
   mqtt: %{host: "localhost", port: 1883},
 
+  # 1880, which is the port the phone has been posting to for years. The plan
+  # assumed 8080; the machine said otherwise. Changing the phone is a change to
+  # something I cannot test, so the daemon moves instead.
+  api: %{port: 1880},
+
   # Log every effect instead of performing it. Ships TRUE: the first thing this
   # daemon does on the real broker should be to tell you what it would have
   # done. Three of the rules it replaces have never fired in production.

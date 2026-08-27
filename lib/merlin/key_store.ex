@@ -38,6 +38,8 @@ defmodule Merlin.KeyStore do
   it was the one thing about its key handling worth keeping.
   """
 
+  require Logger
+
   alias Exqlite.Sqlite3
 
   @schema_version 1
@@ -301,23 +303,41 @@ defmodule Merlin.KeyStore do
         rows = query(old, "SELECT topic, key FROM API_Key", [])
         now = System.os_time(:second)
 
-        imported =
-          Enum.count(rows, fn [topic, key] ->
+        # Counted by what actually landed, not by how many statements ran.
+        #
+        # `INSERT OR IGNORE` is what makes a retried import safe, and it also
+        # swallows every constraint violation -- a legacy row with a null
+        # topic is dropped in silence. Counting successful exec calls
+        # therefore reported "imported 3 key(s)" when one had been written,
+        # and during a cutover that number is the whole basis for believing
+        # the phone will still work.
+        before_count = count(conn)
+
+        Enum.each(rows, fn [topic, key] ->
+          if is_binary(key) and key != "" do
             prefix = binary_part(key, 0, min(8, byte_size(key)))
 
-            case exec(
-                   conn,
-                   """
-                   INSERT OR IGNORE INTO api_key
-                     (key_hash, key_prefix, topic, label, created_at)
-                   VALUES (?, ?, ?, 'imported', ?)
-                   """,
-                   [hash(key), prefix, topic, now]
-                 ) do
-              :ok -> true
-              _ -> false
-            end
-          end)
+            exec(
+              conn,
+              """
+              INSERT OR IGNORE INTO api_key
+                (key_hash, key_prefix, topic, label, created_at)
+              VALUES (?, ?, ?, 'imported', ?)
+              """,
+              [hash(key), prefix, topic, now]
+            )
+          end
+        end)
+
+        imported = count(conn) - before_count
+        skipped = length(rows) - imported
+
+        if skipped > 0 do
+          Logger.warning(
+            "import: #{skipped} of #{length(rows)} legacy row(s) did not land -- already " <>
+              "present, or missing a topic or key. #{imported} imported."
+          )
+        end
 
         {:ok, imported}
       after
@@ -357,7 +377,7 @@ defmodule Merlin.KeyStore do
   defp exec(conn, sql, args), do: exec(conn, sql, args, 1)
 
   defp exec(conn, sql, args, attempt) do
-    {:ok, stmt} = Sqlite3.prepare(conn, sql)
+    stmt = prepare!(conn, sql)
     :ok = Sqlite3.bind(stmt, args)
 
     case Sqlite3.step(conn, stmt) do
@@ -368,13 +388,25 @@ defmodule Merlin.KeyStore do
       :busy ->
         :ok = Sqlite3.release(conn, stmt)
         retry(conn, sql, args, attempt, &exec/4)
+
+      # Anything else -- a read-only file, a disk full, a constraint -- must
+      # say what it was. This clause did not exist, so a database the daemon
+      # user could not write surfaced as a CaseClauseError naming an anonymous
+      # function three frames deep, which tells an operator nothing about the
+      # permissions problem they actually have. Found during the deployment,
+      # by making exactly that mistake.
+      other ->
+        :ok = Sqlite3.release(conn, stmt)
+
+        raise RuntimeError,
+              "sqlite refused a write: #{inspect(other)}. Statement: #{String.trim(sql)}"
     end
   end
 
   defp query(conn, sql, args), do: query(conn, sql, args, 1)
 
   defp query(conn, sql, args, attempt) do
-    {:ok, stmt} = Sqlite3.prepare(conn, sql)
+    stmt = prepare!(conn, sql)
     :ok = Sqlite3.bind(stmt, args)
 
     case Sqlite3.fetch_all(conn, stmt) do
@@ -385,6 +417,27 @@ defmodule Merlin.KeyStore do
       {:error, :busy} ->
         :ok = Sqlite3.release(conn, stmt)
         retry(conn, sql, args, attempt, &query/4)
+
+      other ->
+        :ok = Sqlite3.release(conn, stmt)
+
+        raise RuntimeError,
+              "sqlite refused a read: #{inspect(other)}. Statement: #{String.trim(sql)}"
+    end
+  end
+
+  # A statement that will not even prepare -- a table that is not there,
+  # because --from was pointed at the wrong SQLite file -- must say which
+  # statement and why. `{:ok, stmt} = ...` produced a MatchError naming
+  # neither.
+  defp prepare!(conn, sql) do
+    case Sqlite3.prepare(conn, sql) do
+      {:ok, stmt} ->
+        stmt
+
+      {:error, reason} ->
+        raise RuntimeError,
+              "sqlite refused a statement: #{inspect(reason)}. Statement: #{String.trim(sql)}"
     end
   end
 
