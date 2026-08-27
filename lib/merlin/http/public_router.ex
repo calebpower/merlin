@@ -174,7 +174,10 @@ defmodule Merlin.HTTP.PublicRouter do
         # carrying a credential under a name merlin does not read is
         # indistinguishable from one carrying none, and the operator is left
         # guessing -- which is exactly where this deployment sat.
-        Logger.info("snitch rejected: #{reason}; headers present: #{header_names(conn)}")
+        Logger.info(
+          "snitch rejected: #{reason}; headers present: #{header_names(conn)}; " <>
+            "query parameters: #{query_names(conn)}"
+        )
         :ok
     end
   rescue
@@ -189,9 +192,21 @@ defmodule Merlin.HTTP.PublicRouter do
     conn.req_headers |> Enum.map(&elem(&1, 0)) |> Enum.sort() |> Enum.join(", ")
   end
 
-  # `x-api-key` first, then `authorization: Bearer`. Both are conventional and
-  # neither costs anything to accept.
+  # Header first, then query string. Every route a device might plausibly use,
+  # because a device you cannot reconfigure is the common case and the one that
+  # matters -- an endpoint that only accepts one shape is an endpoint half the
+  # things that need it cannot reach.
+  #
+  # The query string is the weakest of the three: query parameters have a
+  # habit of turning up in proxy logs and browser history. Merlin's own access
+  # log records `conn.request_path`, which excludes the query, and the
+  # rejection log below reports parameter NAMES only -- but on a network where
+  # something else is logging URLs, prefer the header.
   defp api_key_header(conn) do
+    header_key(conn) || query_key(conn)
+  end
+
+  defp header_key(conn) do
     case Plug.Conn.get_req_header(conn, "x-api-key") do
       [key | _] when is_binary(key) and key != "" ->
         key
@@ -203,6 +218,32 @@ defmodule Merlin.HTTP.PublicRouter do
           _ -> nil
         end
     end
+  end
+
+  defp query_key(conn) do
+    conn = Plug.Conn.fetch_query_params(conn)
+
+    case conn.query_params do
+      %{"key" => key} when is_binary(key) and key != "" -> key
+      %{"challenge" => key} when is_binary(key) and key != "" -> key
+      %{"api_key" => key} when is_binary(key) and key != "" -> key
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # Names only, for the same reason as the headers: a parameter VALUE may be
+  # the credential, a parameter NAME never is.
+  defp query_names(conn) do
+    conn = Plug.Conn.fetch_query_params(conn)
+
+    case Map.keys(conn.query_params) do
+      [] -> "none"
+      names -> names |> Enum.sort() |> Enum.join(", ")
+    end
+  rescue
+    _ -> "unreadable"
   end
 
   # Every way a body can fail to be a position report, named.
