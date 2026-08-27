@@ -21,6 +21,12 @@ load_rc_config $name
 : ${merlin_ex_config:="/usr/local/etc/merlin/merlin.exs"}
 : ${merlin_ex_state:="/var/db/merlin"}
 
+# Log what every /snitch request actually carries -- header names, query
+# parameter names, body keys, never any value. For pointing a device at merlin
+# and seeing what it sends. Off by default: on a soak it is a line per position
+# report.
+: ${merlin_ex_trace:="NO"}
+
 pidfile="/var/run/${name}.pid"
 
 # The working directory, and it matters.
@@ -68,6 +74,13 @@ merlin_ex_precmd()
 	# reason and returns non-zero.
 	export MERLIN_CONFIG="${merlin_ex_config}"
 	export MERLIN_STATE_DIR="${merlin_ex_state}"
+
+	case "${merlin_ex_trace}" in
+	[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|1)
+		export MERLIN_SNITCH_TRACE=1
+		echo "merlin-ex: /snitch tracing is ON (header and parameter NAMES only)"
+		;;
+	esac
 
 	_env="MERLIN_CONFIG='${merlin_ex_config}' MERLIN_STATE_DIR='${merlin_ex_state}' HOME='${merlin_ex_state}'"
 
