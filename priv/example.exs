@@ -85,7 +85,7 @@
         [:lamp, :living_room, :one, :power],
         [:lamp, :living_room, :two, :power]
       ],
-      set_topic: "zigbee2mqtt/living_room_lamps/set",
+      set_topic: "z2m/living_room_lamps/set",
       encode: {:json_state, %{on: "ON", off: "OFF"}}
     }
   ],
@@ -111,7 +111,7 @@
     # are facts: absent until observed, and absent is not "off".
     %{
       id: :lamp_one,
-      topic: "zigbee2mqtt/home/living_room/plug/lamp_1",
+      topic: "z2m/home/living_room/plug/lamp_1",
       decode: :json,
       facts: [
         %{
@@ -123,7 +123,7 @@
     },
     %{
       id: :lamp_two,
-      topic: "zigbee2mqtt/home/living_room/plug/lamp_2",
+      topic: "z2m/home/living_room/plug/lamp_2",
       decode: :json,
       facts: [
         %{
@@ -139,7 +139,7 @@
     # defeat its own value-equality dedup; that hack has nowhere to live now.
     %{
       id: :living_room_button,
-      topic: "zigbee2mqtt/home/living_room/switch/lamps/action",
+      topic: "z2m/home/living_room/switch/lamps/action",
       decode: :raw,
       events: [
         %{
@@ -191,7 +191,7 @@
     # --- office A/C (office_aircond.py) ------------------------------------
     %{
       id: :office_ac,
-      topic: "home/office/plug/climate",
+      topic: "z2m/home/office/plug/climate",
       decode: :json,
       facts: [
         %{
@@ -232,7 +232,7 @@
     # means CLOSED (zigbee2mqtt's convention), else `state == "ON"` means OPEN.
     %{
       id: :doors,
-      topic: "home/+room/sensor/contact",
+      topic: "z2m/home/+room/sensor/contact",
       decode: :json,
       facts: [
         %{
@@ -510,18 +510,18 @@
             %{
               on: {:receives, [:printer, :kobra_neo, :power_request]},
               when: "trigger.value == :on",
-              do: [{:publish, "home/office/plug/3d_printer/set", ~s({"state":"ON"})}]
+              do: [{:publish, "z2m/home/office/plug/3d_printer/set", ~s({"state":"ON"})}]
             },
             %{
               on: {:receives, [:printer, :kobra_neo, :power_request]},
               when: "trigger.value == :off",
-              do: [{:publish, "home/office/plug/3d_printer/set", ~s({"state":"OFF"})}]
+              do: [{:publish, "z2m/home/office/plug/3d_printer/set", ~s({"state":"OFF"})}]
             },
             %{
               on: {:receives, [:printer, :kobra_neo, :power_request]},
               when: "trigger.value == :reboot",
               do: [
-                {:publish, "home/office/plug/3d_printer/set", ~s({"state":"OFF"})},
+                {:publish, "z2m/home/office/plug/3d_printer/set", ~s({"state":"OFF"})},
                 {:log, :info, "printer reboot: power cut, 10s dwell"}
               ],
               goto: :dwell
@@ -530,7 +530,7 @@
           dwell: [
             %{
               on: {:after, {10, :second}},
-              do: [{:publish, "home/office/plug/3d_printer/set", ~s({"state":"ON"})}],
+              do: [{:publish, "z2m/home/office/plug/3d_printer/set", ~s({"state":"ON"})}],
               goto: :idle
             },
             # A request arriving mid-cycle is deferred, not dropped. One
@@ -575,7 +575,7 @@
               on: {:enters, [:printer, :kobra_neo, :busy?], true},
               set: %{desired: {:expr, "climate.office.power"}},
               do: [
-                {:publish, "home/office/plug/climate/set", ~s({"state":"OFF"})},
+                {:publish, "z2m/home/office/plug/climate/set", ~s({"state":"OFF"})},
                 {:log, :info, "shedding office A/C for the printer"}
               ],
               goto: :shedding
@@ -618,7 +618,7 @@
               on: {:leaves, [:printer, :kobra_neo, :busy?], true},
               when: "local.desired == :on",
               do: [
-                {:publish, "home/office/plug/climate/set", ~s({"state":"ON"})},
+                {:publish, "z2m/home/office/plug/climate/set", ~s({"state":"ON"})},
                 {:log, :info, "printer finished; restoring office A/C"}
               ],
               goto: :idle
