@@ -16,12 +16,21 @@ rcvar="merlin_ex_enable"
 load_rc_config $name
 
 : ${merlin_ex_enable:="NO"}
-: ${merlin_ex_user:="merlin"}
+: ${merlin_ex_runas:="merlin"}
 : ${merlin_ex_root:="/usr/local/merlin-ex/current"}
 : ${merlin_ex_config:="/usr/local/etc/merlin/merlin.exs"}
 : ${merlin_ex_state:="/var/db/merlin"}
 
 pidfile="/var/run/${name}.pid"
+
+# The working directory, and it matters.
+#
+# `su -m` preserves ROOT's environment including HOME=/root, which the merlin
+# user cannot write. The BEAM needs a writable working directory -- it is
+# where erl_crash.dump goes, among other things -- and without one it dies
+# during boot with a badarg deep inside the logger that names nothing useful.
+# Found by doing exactly that by hand.
+merlin_ex_chdir="${merlin_ex_state}"
 procname="${merlin_ex_root}/erts-*/bin/beam.smp"
 
 command="/usr/sbin/daemon"
@@ -32,7 +41,17 @@ command="/usr/sbin/daemon"
 # daemon(8) supervising a process that exits immediately: -R 5 would then
 # restart it forever and the pidfile would name something that is not the VM.
 # One supervisor, and it is this one.
-command_args="-f -R 5 -S -T ${name} -P ${pidfile} ${merlin_ex_root}/bin/merlin start"
+# `-u` so daemon(8) itself runs as root -- it has to, to write a pidfile in
+# /var/run -- and drops to the merlin user for the child.
+#
+# NOT `${name}_user`: rc.subr treats that as "su the whole command", which
+# runs daemon(8) as merlin and fails with `ppidfile: Permission denied`
+# before the daemon is ever started.
+command_args="-f -u ${merlin_ex_runas} -R 5 -S -T ${name} -P ${pidfile} ${merlin_ex_root}/bin/merlin start"
+
+# HOME too: daemon(8) runs the command with rc's environment, and the release
+# scripts consult it.
+merlin_ex_env="HOME=${merlin_ex_state} MERLIN_CONFIG=${merlin_ex_config} MERLIN_STATE_DIR=${merlin_ex_state}"
 
 start_precmd="merlin_ex_precmd"
 stop_cmd="merlin_ex_stop"
@@ -50,7 +69,9 @@ merlin_ex_precmd()
 	export MERLIN_CONFIG="${merlin_ex_config}"
 	export MERLIN_STATE_DIR="${merlin_ex_state}"
 
-	if ! su -m "${merlin_ex_user}" -c "MERLIN_CONFIG='${merlin_ex_config}' MERLIN_STATE_DIR='${merlin_ex_state}' ${merlin_ex_root}/bin/merlin-preflight"; then
+	_env="MERLIN_CONFIG='${merlin_ex_config}' MERLIN_STATE_DIR='${merlin_ex_state}' HOME='${merlin_ex_state}'"
+
+	if ! su -m "${merlin_ex_runas}" -c "cd '${merlin_ex_state}' && ${_env} ${merlin_ex_root}/bin/merlin-preflight"; then
 		err 1 "preflight failed; refusing to start merlin-ex"
 	fi
 }
@@ -62,7 +83,7 @@ merlin_ex_stop()
 	# lose up to one snapshot interval of latch state.
 	if [ -x "${merlin_ex_root}/bin/merlin" ]; then
 		echo "Stopping ${name}."
-		su -m "${merlin_ex_user}" -c "MERLIN_STATE_DIR='${merlin_ex_state}' ${merlin_ex_root}/bin/merlin stop" || true
+		su -m "${merlin_ex_runas}" -c "cd '${merlin_ex_state}' && MERLIN_STATE_DIR='${merlin_ex_state}' HOME='${merlin_ex_state}' ${merlin_ex_root}/bin/merlin stop" || true
 	fi
 
 	# daemon(8) exits once its child does; clean up if it did not.
@@ -75,7 +96,7 @@ merlin_ex_stop()
 merlin_ex_status()
 {
 	if [ -x "${merlin_ex_root}/bin/merlin" ]; then
-		su -m "${merlin_ex_user}" -c "MERLIN_STATE_DIR='${merlin_ex_state}' ${merlin_ex_root}/bin/merlin pid" >/dev/null 2>&1 &&
+		su -m "${merlin_ex_runas}" -c "cd '${merlin_ex_state}' && MERLIN_STATE_DIR='${merlin_ex_state}' HOME='${merlin_ex_state}' ${merlin_ex_root}/bin/merlin pid" >/dev/null 2>&1 &&
 			echo "${name} is running." ||
 			echo "${name} is not running."
 	else
