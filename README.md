@@ -301,3 +301,24 @@ and anything a reasonable person would call an algorithm is a module by
 definition — the geofence, the travel-time bound, the OAuth2 token lifecycle
 and the four rule executors all are.
 
+## Licence
+
+Copyright 2026 Caleb L. Power
+
+Licensed under the Apache License, Version 2.0. You may not use this work
+except in compliance with the License; a copy is in `LICENSE`, and the
+canonical text is at <https://www.apache.org/licenses/LICENSE-2.0>.
+
+Every dependency is permissive and none imposes a copyleft term: `plug`,
+`req`, `jason`, `tortoise311`, `nimble_options`, `mox`, `stream_data` and
+`dialyxir` are Apache-2.0; `bandit` and `exqlite` are MIT.
+
+There are no per-file licence headers. Apache-2.0 recommends them and does not
+require them, and in this codebase the top of every module is a `@moduledoc`
+carrying the reasoning for what is below it — five lines of boilerplate above
+each one would bury the thing most worth reading.
+
+**If you redistribute a built release rather than the source**, note that it
+contains more than this project. `include_erts: true` bundles Erlang/OTP
+(Apache-2.0) into the tarball, and `exqlite` compiles in SQLite (public
+domain). Their terms travel with the binary.

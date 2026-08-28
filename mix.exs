@@ -8,6 +8,8 @@ defmodule Merlin.MixProject do
       app: :merlin,
       version: @version,
       elixir: "~> 1.19",
+      description: "A home automation platform whose rules are data",
+      package: package(),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       releases: releases(),
@@ -15,6 +17,20 @@ defmodule Merlin.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       test_paths: ["test"],
       dialyzer: dialyzer()
+    ]
+  end
+
+  # Apache-2.0. Every dependency is permissive -- eight are Apache-2.0, bandit
+  # and exqlite are MIT -- so nothing here is constrained by a copyleft term.
+  #
+  # Worth knowing for anyone redistributing a BUILT release rather than the
+  # source: `include_erts: true` puts Erlang/OTP (Apache-2.0) inside the
+  # tarball, and exqlite compiles in SQLite (public domain). A binary release
+  # therefore carries more than this project's own licence.
+  defp package do
+    [
+      licenses: ["Apache-2.0"],
+      links: %{"GitHub" => "https://github.com/calebpower/merlin"}
     ]
   end
 
