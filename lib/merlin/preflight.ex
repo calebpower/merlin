@@ -3,7 +3,7 @@ defmodule Merlin.Preflight do
   Refuse to start rather than flap.
 
   This runs from the rc.d script's `start_precmd`, as the `merlin` user, before
-  the supervision tree exists. If it exits non-zero, `service merlin-ex start`
+  the supervision tree exists. If it exits non-zero, `service merlind start`
   prints the reason and returns non-zero -- instead of the daemon dying in a
   loop under `daemon -R 5` while you read logs to work out why.
 

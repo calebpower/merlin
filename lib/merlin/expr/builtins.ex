@@ -94,6 +94,29 @@ defmodule Merlin.Expr.Builtins do
     end
   end
 
+  # to_s/2: render, or fall back if the value is unknown.
+  #
+  # to_s/1 propagates :unknown, which is right -- three-valued logic is the
+  # whole discipline and a stringified "unknown" leaking into a comparison is
+  # exactly what it exists to stop. But it makes the obvious spelling of a
+  # message dangerous: `"a door opened: " + to_s(trigger.room)` is :unknown
+  # when the room is missing, the action is skipped as an unresolvable value,
+  # and an intruder alert is silently suppressed because merlin could not name
+  # the door. Losing the name must not cost the alert.
+  #
+  # So the safe form is the SHORT form. Anything that names a thing in a
+  # message should reach for this one.
+  def build(:to_s_or, [a, fallback]) do
+    rendered = build(:to_s, [a])
+
+    fn env ->
+      case rendered.(env) do
+        :unknown -> fallback.(env)
+        v -> v
+      end
+    end
+  end
+
   def build(:abs_, [a]) do
     fn env ->
       case a.(env) do

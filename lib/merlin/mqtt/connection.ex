@@ -212,7 +212,7 @@ defmodule Merlin.MQTT.Connection do
   defp dispatch(module, opts, topic, payload, captures, state) do
     case module.handle_ingress(topic, payload, captures, opts) do
       {:ok, emissions} ->
-        Enum.each(emissions, &apply_emission(&1, module, state))
+        Enum.each(emissions, &apply_emission(&1, module, captures, state))
 
       {:error, reason} ->
         Logger.warning("#{inspect(module)} rejected #{topic}: #{inspect(reason)}")
@@ -228,12 +228,14 @@ defmodule Merlin.MQTT.Connection do
       Logger.warning("#{inspect(module)} threw #{kind} on #{topic}: #{inspect(reason)}")
   end
 
-  defp apply_emission({:fact, path, value}, module, _state) do
-    World.put(path, value, source: {:adapter, module})
+  # The captures come from the router, not from the adapter, so an adapter
+  # cannot forget to pass them on and every source gets them for free.
+  defp apply_emission({:fact, path, value}, module, captures, _state) do
+    World.put(path, value, source: {:adapter, module}, captures: captures)
   end
 
-  defp apply_emission({:event, path, payload}, module, _state) do
-    World.emit(path, payload, source: {:adapter, module})
+  defp apply_emission({:event, path, payload}, module, captures, _state) do
+    World.emit(path, payload, source: {:adapter, module}, captures: captures)
   end
 
   # Adapters reach the broker without going through Merlin.Effects, so the
@@ -245,7 +247,7 @@ defmodule Merlin.MQTT.Connection do
   # few seconds, which is not a bug being tolerated -- it is the daemon saying
   # truthfully that it is not acting yet. `/healthz` and `bin/merlin rpc` both
   # answer throughout.
-  defp apply_emission({:publish, topic, payload, opts} = emission, module, state) do
+  defp apply_emission({:publish, topic, payload, opts} = emission, module, _captures, state) do
     if Merlin.Settle.settling?() and Merlin.Settle.suppresses?(emission) do
       Logger.info(
         "[settling #{Merlin.Settle.remaining_ms()}ms] held: publish #{topic} " <>

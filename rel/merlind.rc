@@ -1,0 +1,125 @@
+#!/bin/sh
+#
+# PROVIDE: merlind
+# REQUIRE: LOGIN mosquitto
+# KEYWORD: shutdown
+#
+# merlin's daemon. Installed as /usr/local/etc/rc.d/merlind.
+#
+# `merlind` is the service; `merlin` is reserved for the command-line
+# interface. During the cutover this was `merlin-ex`, beside the Python
+# installation it was replacing; the Python is gone and the suffix with it.
+#
+# rc.conf:
+#   merlind_enable="YES"
+
+. /etc/rc.subr
+
+name="merlind"
+rcvar="merlind_enable"
+
+load_rc_config $name
+
+: ${merlind_enable:="NO"}
+: ${merlind_runas:="merlin"}
+: ${merlind_root:="/usr/local/merlin/current"}
+: ${merlind_config:="/usr/local/etc/merlin/merlin.exs"}
+: ${merlind_state:="/var/db/merlin"}
+
+# Log what every /snitch request actually carries -- header names, query
+# parameter names, body keys, never any value. For pointing a device at merlin
+# and seeing what it sends. Off by default: on a soak it is a line per position
+# report.
+: ${merlind_trace:="NO"}
+
+pidfile="/var/run/${name}.pid"
+
+# The working directory, and it matters.
+#
+# `su -m` preserves ROOT's environment including HOME=/root, which the merlin
+# user cannot write. The BEAM needs a writable working directory -- it is
+# where erl_crash.dump goes, among other things -- and without one it dies
+# during boot with a badarg deep inside the logger that names nothing useful.
+# Found by doing exactly that by hand.
+merlind_chdir="${merlind_state}"
+procname="${merlind_root}/erts-*/bin/beam.smp"
+
+command="/usr/sbin/daemon"
+
+# `start`, in the FOREGROUND, under daemon(8) -- not `bin/merlind daemon`.
+#
+# The release's own `daemon` verb detaches via run_erl, which would leave
+# daemon(8) supervising a process that exits immediately: -R 5 would then
+# restart it forever and the pidfile would name something that is not the VM.
+# One supervisor, and it is this one.
+# `-u` so daemon(8) itself runs as root -- it has to, to write a pidfile in
+# /var/run -- and drops to the merlin user for the child.
+#
+# NOT `${name}_user`: rc.subr treats that as "su the whole command", which
+# runs daemon(8) as merlin and fails with `ppidfile: Permission denied`
+# before the daemon is ever started.
+command_args="-f -u ${merlind_runas} -R 5 -S -T ${name} -P ${pidfile} ${merlind_root}/bin/merlind start"
+
+# HOME too: daemon(8) runs the command with rc's environment, and the release
+# scripts consult it.
+merlind_env="HOME=${merlind_state} MERLIN_CONFIG=${merlind_config} MERLIN_STATE_DIR=${merlind_state}"
+
+start_precmd="merlind_precmd"
+stop_cmd="merlind_stop"
+status_cmd="merlind_status"
+
+merlind_precmd()
+{
+	# Preflight, as the merlin user, before anything starts. It validates the
+	# config, resolves every secret, opens the database, connects to the
+	# broker and binds the ports.
+	#
+	# Without this a bad config is a restart loop under -R 5 while you read
+	# logs to work out why; with it, `service merlind start` prints the
+	# reason and returns non-zero.
+	export MERLIN_CONFIG="${merlind_config}"
+	export MERLIN_STATE_DIR="${merlind_state}"
+
+	case "${merlind_trace}" in
+	[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|1)
+		export MERLIN_SNITCH_TRACE=1
+		echo "merlind: /snitch tracing is ON (header and parameter NAMES only)"
+		;;
+	esac
+
+	_env="MERLIN_CONFIG='${merlind_config}' MERLIN_STATE_DIR='${merlind_state}' HOME='${merlind_state}'"
+
+	if ! su -m "${merlind_runas}" -c "cd '${merlind_state}' && ${_env} ${merlind_root}/bin/merlin-preflight"; then
+		err 1 "preflight failed; refusing to start merlind"
+	fi
+}
+
+merlind_stop()
+{
+	# Through the release, so terminate/2 runs and the fact snapshot is
+	# written. A signal to daemon(8) would take the VM down without it and
+	# lose up to one snapshot interval of latch state.
+	if [ -x "${merlind_root}/bin/merlind" ]; then
+		echo "Stopping ${name}."
+		su -m "${merlind_runas}" -c "cd '${merlind_state}' && MERLIN_STATE_DIR='${merlind_state}' HOME='${merlind_state}' ${merlind_root}/bin/merlind stop" || true
+	fi
+
+	# daemon(8) exits once its child does; clean up if it did not.
+	if [ -f "${pidfile}" ]; then
+		pkill -F "${pidfile}" 2>/dev/null || true
+		rm -f "${pidfile}"
+	fi
+}
+
+merlind_status()
+{
+	if [ -x "${merlind_root}/bin/merlind" ]; then
+		su -m "${merlind_runas}" -c "cd '${merlind_state}' && MERLIN_STATE_DIR='${merlind_state}' HOME='${merlind_state}' ${merlind_root}/bin/merlind pid" >/dev/null 2>&1 &&
+			echo "${name} is running." ||
+			echo "${name} is not running."
+	else
+		echo "${name} is not installed at ${merlind_root}."
+	fi
+}
+
+run_rc_command "$1"

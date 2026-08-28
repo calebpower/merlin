@@ -56,6 +56,7 @@ defmodule Merlin.Machine do
     :states,
     :watches,
     :watch_events,
+    :watch_groups,
     data: %{},
     persist: false,
     enabled: true
@@ -81,7 +82,7 @@ defmodule Merlin.Machine do
          {:ok, states} <- compile_states(id, Map.get(m, :states, %{})),
          :ok <- check_gotos(id, initial, states),
          :ok <- check_slots(id, Map.get(m, :data, %{}), states) do
-      {fact_watches, event_watches} = watches(states)
+      {fact_watches, event_watches, group_watches} = watches(states)
 
       {:ok,
        %__MODULE__{
@@ -93,7 +94,8 @@ defmodule Merlin.Machine do
          persist: Map.get(m, :persist, false),
          enabled: Map.get(m, :enabled, true),
          watches: fact_watches,
-         watch_events: event_watches
+         watch_events: event_watches,
+         watch_groups: group_watches
        }}
     end
   end
@@ -262,11 +264,14 @@ defmodule Merlin.Machine do
           do: watch
 
     all = Enum.uniq(all)
-    {for({:fact, p} <- all, do: p), for({:event, p} <- all, do: p)}
+
+    {for({:fact, p} <- all, do: p), for({:event, p} <- all, do: p),
+     for({:group, g} <- all, do: g)}
   end
 
   defp trigger_watches({:changes, path}), do: [{:fact, path}]
   defp trigger_watches({:changes_under, prefix}), do: [{:fact, prefix}]
+  defp trigger_watches({:changes_in, group}), do: [{:group, group}]
   defp trigger_watches({:enters, path, _}), do: [{:fact, path}]
   defp trigger_watches({:leaves, path, _}), do: [{:fact, path}]
   defp trigger_watches({:receives, path}), do: [{:event, path}]

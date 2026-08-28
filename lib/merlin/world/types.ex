@@ -59,14 +59,20 @@ defmodule Merlin.Event do
   """
 
   @enforce_keys [:path, :payload, :at, :source]
-  defstruct [:path, :payload, :at, :source]
+  defstruct [:path, :payload, :at, :source, captures: %{}]
 
   @type t :: %__MODULE__{
           path: Merlin.Path.t(),
           payload: term(),
           at: integer(),
-          source: term()
+          source: term(),
+          captures: %{optional(binary()) => binary()}
         }
+
+  @doc "The `trigger.*` bindings an expression sees for this event."
+  @spec trigger_env(t()) :: map()
+  def trigger_env(%__MODULE__{} = e),
+    do: %{value: e.payload, path: e.path, captures: e.captures}
 end
 
 defmodule Merlin.Change do
@@ -77,10 +83,26 @@ defmodule Merlin.Change do
   (`{:enters, path, v}`, `{:leaves, path, v}`) are defined by the transition
   and not by the resting value. `old` is `nil` for a fact's first write, which
   is distinguishable from a change *to* nil by `first?`.
+
+  ## Captures
+
+  `captures` holds the named topic wildcards of the message that produced this
+  change, so a rule can read `trigger.room` for a fact written by a source
+  bound to `z2m/home/+room/sensor/contact`.
+
+  Without it the room is *structural* -- it is a segment of the fact path and
+  nothing else -- and a rule triggered on `{:changes_under, [:door]}` can see
+  that a door moved but not which one. `door_presence`'s description promised
+  to name the room for a whole milestone while it logged only `open`/`closed`,
+  because there was no way for it to say more.
+
+  Empty for every write that did not come from a captured topic: a derived
+  fact, a rule's own `set_fact`, a snapshot restore. `trigger.room` is then
+  `:unknown`, which is the correct answer rather than a missing one.
   """
 
   @enforce_keys [:path, :old, :new, :at, :source, :seq, :first?]
-  defstruct [:path, :old, :new, :at, :source, :seq, :first?, :cause, depth: 0]
+  defstruct [:path, :old, :new, :at, :source, :seq, :first?, :cause, depth: 0, captures: %{}]
 
   @type t :: %__MODULE__{
           path: Merlin.Path.t(),
@@ -91,7 +113,8 @@ defmodule Merlin.Change do
           seq: pos_integer(),
           first?: boolean(),
           cause: pos_integer() | nil,
-          depth: non_neg_integer()
+          depth: non_neg_integer(),
+          captures: %{optional(binary()) => binary()}
         }
 
   @doc """
@@ -108,4 +131,17 @@ defmodule Merlin.Change do
   def caused_by(%__MODULE__{seq: seq, depth: depth}) do
     [cause: seq, depth: depth + 1]
   end
+
+  @doc """
+  The `trigger.*` bindings an expression sees for this change.
+
+  Here rather than in the two callers because the rules engine and the machine
+  server had this written out identically, and the keys it produces are the
+  reserved names `Merlin.Config.File` refuses as topic captures. Three copies
+  of one list is how the last several defects in this system got in; the tier 1
+  test asserts these keys against that refusal list directly.
+  """
+  @spec trigger_env(t()) :: map()
+  def trigger_env(%__MODULE__{} = c),
+    do: %{value: c.new, prev: c.old, path: c.path, first?: c.first?, captures: c.captures}
 end

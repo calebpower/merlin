@@ -40,12 +40,16 @@ defmodule Merlin.Config do
   @doc """
   MQTT client id.
 
-  Distinct from the Python daemon's by default, so both can be attached to the
-  same broker during the cutover -- a broker evicts an existing session when a
-  second client presents the same id.
+  Was `merlin-ex` through the cutover, so that the Elixir daemon and the Python
+  one could hold sessions on the same broker at once -- a broker evicts an
+  existing session when a second client presents the same id. The Python is
+  gone, so this is simply `merlin`.
+
+  Override with `MERLIN_CLIENT_ID` when running a second instance against the
+  same broker; `reaper/smoke.sh` does exactly that.
   """
   @spec client_id() :: binary()
-  def client_id, do: env("MERLIN_CLIENT_ID") || app(:client_id, "merlin-ex")
+  def client_id, do: env("MERLIN_CLIENT_ID") || app(:client_id, "merlin")
 
   @doc """
   Whether to log effects instead of performing them.

@@ -15,6 +15,21 @@ defmodule Merlin.Groups do
   and -- more importantly -- means the rule never names a topic or a payload
   shape. It says `set_group(:living_room_lamps, :off)`; this module knows that
   becomes `{"state":"OFF"}` on a particular topic.
+
+  ## A group is a set first and a command target second
+
+      %{id: :exterior_doors,
+        members: [[:door, "front_door", :contact], [:door, "back_door", :contact]]}
+
+  `set_topic` is optional, because a set of facts is a useful thing to name
+  even when nothing can be commanded. That is what `{:changes_in, group}` and
+  `any_eq?/2` read, and it is how "only the exterior doors alarm" becomes four
+  lines of house data instead of a concept the platform has to understand.
+
+  A group with no `set_topic` is refused as the target of `set_group` at boot,
+  by `Merlin.Config.File`, rather than failing silently at 3am. `set/2` still
+  checks, because a validator and a runtime that disagree is how the last
+  three defects in this system got in.
   """
 
   require Logger
@@ -40,13 +55,38 @@ defmodule Merlin.Groups do
   @spec set(atom(), term()) :: :ok | {:error, term()}
   def set(id, value) do
     case Map.fetch(all(), id) do
-      {:ok, group} ->
+      {:ok, %{set_topic: topic} = group} when is_binary(topic) ->
         payload = encode(Map.get(group, :encode, :raw), value)
-        Merlin.MQTT.Connection.publish(group.set_topic, payload, qos: 0)
+        Merlin.MQTT.Connection.publish(topic, payload, qos: 0)
+
+      {:ok, _members_only} ->
+        {:error, {:group_not_commandable, id}}
 
       :error ->
         {:error, {:unknown_group, id}}
     end
+  end
+
+  @doc """
+  Subscribe the calling process to changes on every member of `id`.
+
+  The subscription *is* the membership, so a group gaining a door gains the
+  rule that watches it -- there is no second list to keep in step. This is the
+  same reasoning as deriving a rule's watches from its triggers.
+  """
+  @spec subscribe(atom()) :: :ok
+  def subscribe(id) do
+    case members(id) do
+      [] ->
+        # Config validation refuses an empty group, so reaching here means the
+        # group is gone entirely. Silence would be a rule that watches nothing.
+        Logger.warning("group #{inspect(id)} has no members: nothing subscribed")
+
+      paths ->
+        Enum.each(paths, &Merlin.Bus.subscribe/1)
+    end
+
+    :ok
   end
 
   @doc """

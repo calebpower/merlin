@@ -96,6 +96,41 @@ defmodule Merlin.Geo do
   def to_meters({n, :km}), do: km(n)
   def to_meters(n) when is_number(n), do: m(n)
 
+  @doc """
+  A speed in metres per second, from a declared unit.
+
+  Speeds are declared the way distances are -- `{120, :kph}` -- so a config
+  says how fast someone could plausibly travel in the units a person thinks
+  in, and nothing downstream has to know which.
+  """
+  @spec to_mps({number(), :mps | :kph | :mph} | number()) :: float()
+  def to_mps({n, :mps}) when is_number(n), do: n * 1.0
+  def to_mps({n, :kph}) when is_number(n), do: n * 1_000.0 / 3_600.0
+  def to_mps({n, :mph}) when is_number(n), do: n * 1_609.344 / 3_600.0
+  def to_mps(n) when is_number(n), do: n * 1.0
+
+  @doc """
+  The soonest someone travelling at `speed` could get from `a` to `b`, in
+  milliseconds.
+
+  Straight-line, so it is a genuine lower bound: no road is shorter than the
+  great circle. That is the property that makes it safe to reason with -- if
+  this says four minutes and only two have passed, they certainly have not
+  arrived, whatever route they took.
+  """
+  @spec min_travel_ms(point(), point(), {number(), atom()} | number()) :: non_neg_integer()
+  def min_travel_ms(a, b, speed) do
+    mps = to_mps(speed)
+
+    if mps <= 0 do
+      # An unmoving subject never arrives. Represented as "not within any time
+      # this system will run for" rather than as an error.
+      :infinity
+    else
+      round(distance(a, b) / mps * 1_000)
+    end
+  end
+
   @doc "The mean Earth radius used, in metres. Exposed so tests can derive expectations."
   @spec earth_radius_m() :: float()
   def earth_radius_m, do: @earth_radius_m

@@ -62,6 +62,8 @@ defmodule Merlin.World.Writer do
     * `:cause`   -- the `seq` of the change that triggered this write
     * `:depth`   -- causal chain depth, defaulting to 0
     * `:stale_after` -- milliseconds after which the fact counts as stale
+    * `:captures` -- named topic wildcards of the message this came from,
+      carried onto the change so a rule can read `trigger.room`
   """
   @spec put(Path.t(), term(), keyword()) ::
           {:changed, term(), term()} | :unchanged | {:dropped, :max_depth}
@@ -139,7 +141,8 @@ defmodule Merlin.World.Writer do
       path: path,
       payload: payload,
       at: now(),
-      source: Keyword.get(opts, :source)
+      source: Keyword.get(opts, :source),
+      captures: Keyword.get(opts, :captures, %{})
     }
 
     {:reply, Bus.emit(event), state}
@@ -187,7 +190,11 @@ defmodule Merlin.World.Writer do
         cause: Keyword.get(opts, :cause),
         # Carried so that a process reacting to this change can pass
         # Change.caused_by/1 and have the guard actually bound the chain.
-        depth: depth
+        depth: depth,
+        # The room, the device id -- whatever the source's topic filter named.
+        # Only the ingest path supplies these; everything else writes %{} and
+        # a rule reading trigger.<name> correctly gets :unknown.
+        captures: Keyword.get(opts, :captures, %{})
       })
     end
 

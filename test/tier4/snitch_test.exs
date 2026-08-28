@@ -267,4 +267,271 @@ defmodule Merlin.HTTP.SnitchTest do
       end
     end
   end
+
+  describe "the operator is told why a request was rejected" do
+    # The always-200 rule is about what the CLIENT learns. Collapsing every
+    # failure into a silent :ok left the operator with a 200 and an empty log
+    # for a wrong key, a missing field and malformed JSON alike -- which is
+    # exactly the position a real deployment sat in for an afternoon.
+    #
+    # The reason is logged. The key never is.
+    import ExUnit.CaptureLog
+
+    # The test environment filters at :warning. These messages are :info --
+    # correctly, since a rejected request is information rather than a fault,
+    # and production runs at :info so they will appear there. Raising the
+    # level here is the right way round: the code should not be logged louder
+    # than it deserves to satisfy a test.
+    setup do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+      :ok
+    end
+
+    defp post_body(body) do
+      capture_log(fn ->
+        conn(:post, "/snitch", body) |> put_req_header("content-type", "application/json")
+        |> Merlin.HTTP.PublicRouter.call([])
+        Process.sleep(20)
+      end)
+    end
+
+    test "malformed JSON says so" do
+      assert post_body("{not json") =~ "not valid JSON"
+    end
+
+    test "a missing challenge names the keys that were present" do
+      log = post_body(~s({"status":{"a":1}}))
+      assert log =~ "no `challenge` field"
+      assert log =~ "status"
+    end
+
+    test "a missing status says so" do
+      assert post_body(~s({"challenge":"abcdefghijkl"})) =~ "no `status` field"
+    end
+
+    test "a null status is distinguished from a missing one" do
+      assert post_body(~s({"challenge":"abcdefghijkl","status":null})) =~ "is null"
+    end
+
+    test "a non-string challenge names its type" do
+      assert post_body(~s({"challenge":123,"status":{"a":1}})) =~ "not a string"
+    end
+
+    test "an unrecognised key is reported by PREFIX, never in full" do
+      key = "abcdefghijklmnopqrstuvwxyz012345"
+      log = post_body(~s({"challenge":"#{key}","status":{"a":1}}))
+
+      assert log =~ "not recognised"
+      assert log =~ "abcdefgh"
+
+      refute log =~ key,
+             "the full key was written to the log -- api.py:31 all over again"
+
+      refute log =~ "ijklmnop",
+             "more than the identifying prefix reached the log"
+    end
+
+    test "the reason mentions where to look" do
+      log = post_body(~s({"challenge":"abcdefghijklmnop","status":{"a":1}}))
+      assert log =~ "merlin-key list"
+    end
+  end
+
+  describe "the key may travel in a header, with the body as the payload" do
+    # The better shape, and the one that should have been original. A
+    # credential in the body forces the body into merlin's envelope, so the
+    # DEVICE has to be reconfigured to merlin -- and a device is usually the
+    # thing you cannot change or test. With the key in a header the body is
+    # whatever the device natively sends, injected verbatim.
+    defp post_with(body, headers) do
+      Enum.reduce(headers, conn(:post, "/snitch", body), fn {k, v}, c ->
+        put_req_header(c, k, v)
+      end)
+      |> put_req_header("content-type", "application/json")
+      |> @router.call(@opts)
+    end
+
+    test "x-api-key with a raw body injects the body verbatim", %{key: key} do
+      body = ~s({"gps_latitude":51.4779,"gps_longitude":-0.0015,"batt_level":88})
+
+      assert %{status: 200} = post_with(body, [{"x-api-key", key}])
+
+      assert_receive {:injected, "http/mobile/ariia/state", payload, opts}
+      assert payload == body, "the body was rewrapped rather than passed through"
+      assert {:http, id} = opts[:source]
+      assert is_integer(id)
+    end
+
+    test "authorization: Bearer works too", %{key: key} do
+      body = ~s({"gps_latitude":51.5})
+      assert %{status: 200} = post_with(body, [{"authorization", "Bearer " <> key}])
+      assert_receive {:injected, "http/mobile/ariia/state", ^body, _}
+    end
+
+    test "a bad header key injects nothing and is reported by prefix" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      bad = "not-a-real-key-at-all-0123456789"
+
+      log =
+        capture_log(fn ->
+          assert %{status: 200} = post_with(~s({"gps_latitude":1.0}), [{"x-api-key", bad}])
+        end)
+
+      refute_receive {:injected, _, _, _}, 50
+      assert log =~ "from the header is not"
+      assert log =~ "not-a-re"
+      refute log =~ bad, "the full key reached the log"
+    end
+
+    # The envelope must keep working: things already use it.
+    test "the challenge/status envelope still works", %{key: key} do
+      assert %{status: 200} =
+               post_with(~s({"challenge":"#{key}","status":{"gps_latitude":51.4}}), [])
+
+      assert_receive {:injected, "http/mobile/ariia/state", payload, _}
+      assert Jason.decode!(payload) == %{"gps_latitude" => 51.4}
+    end
+
+    # An empty header must not count as a credential, or it silently bypasses
+    # the envelope path and every such request is dropped with a confusing
+    # reason.
+    # Without this the operator cannot tell a request carrying a credential
+    # under an unread name from one carrying none at all.
+    test "a rejection names the headers that were present, never their values" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        capture_log(fn ->
+          post_with(~s({"gps_latitude":1.0}), [{"x-wrong-name", "super-secret-value-here"}])
+        end)
+
+      assert log =~ "headers present:"
+      assert log =~ "x-wrong-name"
+
+      refute log =~ "super-secret-value-here",
+             "a header VALUE reached the log -- names only"
+    end
+
+    test "a key in the query string works, with the body verbatim", %{key: key} do
+      body = ~s({"gps_latitude":51.4779,"gps_longitude":-0.0015})
+
+      assert %{status: 200} =
+               conn(:post, "/snitch?key=" <> URI.encode_www_form(key), body)
+               |> put_req_header("content-type", "application/json")
+               |> @router.call(@opts)
+
+      assert_receive {:injected, "http/mobile/ariia/state", ^body, _}
+    end
+
+    test "`challenge` and `api_key` work as query names too", %{key: key} do
+      for name <- ["challenge", "api_key"] do
+        assert %{status: 200} =
+                 conn(:post, "/snitch?#{name}=" <> URI.encode_www_form(key), ~s({"a":1}))
+                 |> put_req_header("content-type", "application/json")
+                 |> @router.call(@opts)
+
+        assert_receive {:injected, "http/mobile/ariia/state", _, _}
+      end
+    end
+
+    test "a header key wins over a query key", %{key: key} do
+      # If both are present the header is the one that should count: it is the
+      # form less likely to be logged by something else.
+      assert %{status: 200} =
+               conn(:post, "/snitch?key=rubbish", ~s({"a":1}))
+               |> put_req_header("content-type", "application/json")
+               |> put_req_header("x-api-key", key)
+               |> @router.call(@opts)
+
+      assert_receive {:injected, "http/mobile/ariia/state", _, _}
+    end
+
+    test "tracing reports every request, names only, and only when enabled" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      System.put_env("MERLIN_SNITCH_TRACE", "1")
+
+      on_exit(fn ->
+        Logger.configure(level: previous)
+        System.delete_env("MERLIN_SNITCH_TRACE")
+      end)
+
+      log =
+        capture_log(fn ->
+          conn(:post, "/snitch?tok=secret-query-value", ~s({"gps_latitude":1.0,"batt_level":9}))
+          |> put_req_header("content-type", "application/json")
+          |> put_req_header("x-secret-header", "secret-header-value")
+          |> @router.call(@opts)
+        end)
+
+      assert log =~ "snitch trace:"
+      assert log =~ "gps_latitude"
+      assert log =~ "x-secret-header"
+      assert log =~ "tok"
+
+      refute log =~ "secret-header-value", "a header value reached the trace"
+      refute log =~ "secret-query-value", "a query value reached the trace"
+    end
+
+    test "tracing is silent when not enabled" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      System.delete_env("MERLIN_SNITCH_TRACE")
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        capture_log(fn ->
+          conn(:post, "/snitch", ~s({"a":1}))
+          |> put_req_header("content-type", "application/json")
+          |> @router.call(@opts)
+        end)
+
+      refute log =~ "snitch trace:"
+    end
+
+    test "a rejection names query parameters, never their values" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        capture_log(fn ->
+          conn(:post, "/snitch?wrongname=super-secret-value", ~s({"gps_latitude":1.0}))
+          |> put_req_header("content-type", "application/json")
+          |> @router.call(@opts)
+        end)
+
+      assert log =~ "query parameters:"
+      assert log =~ "wrongname"
+      refute log =~ "super-secret-value", "a query VALUE reached the log"
+    end
+
+    test "an empty x-api-key falls through to the envelope" do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        capture_log(fn ->
+          post_with(~s({"gps_latitude":1.0}), [{"x-api-key", ""}])
+        end)
+
+      assert log =~ "no `challenge` field"
+      refute_receive {:injected, _, _, _}, 50
+    end
+
+    # A header key must still be scoped to its own topic.
+    test "a header key cannot write outside the topic it resolves to", %{key: key} do
+      assert %{status: 200} = post_with(~s({"a":1}), [{"x-api-key", key}])
+      assert_receive {:injected, topic, _, _}
+      assert topic == "http/mobile/ariia/state"
+    end
+  end
 end

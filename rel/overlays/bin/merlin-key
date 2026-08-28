@@ -3,7 +3,7 @@
 # separate BEAM, and SQLite in WAL mode allows both to hold the file.
 #
 # Arguments travel in the environment, one per line, rather than being
-# interpolated into the eval expression. `bin/merlin eval` takes an expression
+# interpolated into the eval expression. `bin/merlind eval` takes an expression
 # and does NOT populate System.argv() from trailing shell arguments, and
 # building the expression by string interpolation would mean quoting user
 # input into code -- which is exactly the shape of mistake worth refusing to
@@ -12,4 +12,4 @@ set -eu
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 MERLIN_ARGV=$(printf '%s\n' "$@")
 export MERLIN_ARGV
-exec "$SCRIPT_DIR/merlin" eval 'Merlin.CLI.main(:key, Merlin.CLI.argv())'
+exec "$SCRIPT_DIR/merlind" eval 'Merlin.CLI.main(:key, Merlin.CLI.argv())'
