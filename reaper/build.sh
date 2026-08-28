@@ -122,7 +122,7 @@ mix release --overwrite
 
 # Hand the artifact back. Only out/ is pulled to the workstation, so anything
 # not copied here does not survive the session.
-tarball=$(find "$MIX_BUILD_ROOT" -name 'merlin-*.tar.gz' -type f 2>/dev/null | head -1 || true)
+tarball=$(find "$MIX_BUILD_ROOT" -name 'merlind-*.tar.gz' -type f 2>/dev/null | head -1 || true)
 if [ -n "$tarball" ]; then
     cp "$tarball" "$REAPER_OUT/"
     say "release tarball -> $REAPER_OUT/$(basename "$tarball")"

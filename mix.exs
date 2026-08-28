@@ -87,9 +87,13 @@ defmodule Merlin.MixProject do
     ]
   end
 
+  # `merlind`, not `merlin`. The release's boot script is the daemon control
+  # interface -- start, stop, rpc -- and the plain name is reserved for the
+  # command-line tool. The OTP application stays `:merlin`; only the release
+  # and its bin/ script are named for the daemon.
   defp releases do
     [
-      merlin: [
+      merlind: [
         include_executables_for: [:unix],
         # Self-contained. This is what makes the daemon immune to a `pkg
         # upgrade` moving a runtime out from under it -- the exact failure that

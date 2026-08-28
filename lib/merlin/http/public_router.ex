@@ -193,7 +193,7 @@ defmodule Merlin.HTTP.PublicRouter do
   # that only fires on some paths.
   #
   # Off unless asked for: on a soak this is a line per position report, and a
-  # log nobody can skim is a log nobody reads. `merlin_ex_trace=YES` in
+  # log nobody can skim is a log nobody reads. `merlind_trace=YES` in
   # rc.conf, or MERLIN_SNITCH_TRACE=1.
   #
   # Names only, never values, exactly as the rejection path does -- a trace
