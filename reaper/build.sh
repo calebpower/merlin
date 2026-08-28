@@ -79,6 +79,18 @@ say "OTP $otp_major, Elixir $elixir_ver"
 [ "$elixir_minor" = "$WANT_ELIXIR_MINOR" ] \
     || die "Elixir $elixir_ver, expected $WANT_ELIXIR_MINOR.x"
 
+# Destroy the previous run's ledger before this one builds anything.
+#
+# The run phase can fail in ways that never reach tiers.sh -- a transport stall
+# writing the job script is one, and it happened -- and out/ is synced back
+# regardless. What comes back then is the PREVIOUS run's table, sitting beside
+# this run's freshly built tarball and looking exactly like a result. It fooled
+# a reader once already.
+#
+# Absence is unambiguous in a way that a stale file is not: no ledger means no
+# tiers ran, and there is nothing to misread.
+rm -f "$REAPER_OUT/tiers.tsv"
+
 # Record it. A build log that does not say which toolchain produced the
 # artifact cannot be used to explain the artifact later.
 {
@@ -97,6 +109,12 @@ mix local.rebar --force --if-missing
 
 say "deps"
 mix deps.get
+
+# Publish the resolved lock, for the same reason toolchain.txt exists: a build
+# that cannot say which dependency versions produced the artifact cannot be
+# used to explain the artifact later. With mix.lock committed this is a
+# confirmation; without one it is the only record of what was actually built.
+if [ -f mix.lock ]; then cp mix.lock "$REAPER_OUT/mix.lock"; fi
 
 say "compile (warnings are errors)"
 mix compile --warnings-as-errors
