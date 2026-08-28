@@ -207,6 +207,12 @@ defmodule Merlin.Config.File do
 
   defp valid_point?(_), do: false
 
+  defp valid_speed?({n, unit}) when is_number(n) and n > 0 and unit in [:mps, :kph, :mph],
+    do: true
+
+  defp valid_speed?(n) when is_number(n) and n > 0, do: true
+  defp valid_speed?(_), do: false
+
   defp valid_radius?({n, unit}) when is_number(n) and n > 0 and unit in [:m, :ft, :mi, :km],
     do: true
 
@@ -340,6 +346,10 @@ defmodule Merlin.Config.File do
 
         produced_paths(d) == :error ->
           [{:derived_missing_out, d[:id]}]
+
+        Map.get(d, :kind) == :geofence and Map.has_key?(d, :max_speed) and
+            not valid_speed?(d.max_speed) ->
+          [{:bad_max_speed, d.id, d.max_speed}]
 
         d.kind == :expr ->
           hold_errors(d) ++
@@ -540,6 +550,11 @@ defmodule Merlin.Config.File do
 
   defp describe({:duplicate_producer, path, ids}),
     do: "#{path} is written by more than one derived fact: #{Enum.map_join(ids, ", ", &inspect/1)}"
+
+  defp describe({:bad_max_speed, id, speed}),
+    do:
+      "#{inspect(id)} declares max_speed: #{inspect(speed)}, which is not a positive speed. " <>
+        "Use {120, :kph}, {75, :mph} or {33, :mps}."
 
   defp describe({:unknown_zone, where, zone, declared}),
     do:

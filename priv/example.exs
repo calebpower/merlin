@@ -328,6 +328,20 @@
       lon: [:person, :owner, :lon],
       accuracy: [:person, :owner, :accuracy_m],
       max_accuracy_m: 100,
+      # How fast this person could plausibly travel. Used to decide how long a
+      # fix remains an ANSWER: once somewhere else has been reachable for
+      # longer than the fix is old, the zone becomes :unknown rather than
+      # standing indefinitely.
+      #
+      # A flat stale_after cannot express this. Thirty minutes is neither
+      # generous nor safe and says nothing about geography; "could he be home
+      # by now" is the question the rules actually ask, and distance divided
+      # by speed answers it.
+      #
+      # Generous on purpose: this is a bound on the possible, not a typical
+      # journey. Being too fast only shortens how long merlin will claim to
+      # know where someone is, which is the safe direction.
+      max_speed: {120, :kph},
       out: [:person, :owner, :zone],
       out_position: [:person, :owner, :position],
       # A phone silent for half an hour is not evidence of being anywhere.
@@ -341,6 +355,8 @@
       lon: [:vehicle, :car, :lon],
       accuracy: [:vehicle, :car, :accuracy_m],
       max_accuracy_m: 100,
+      # Faster than the phone: a car on a motorway.
+      max_speed: {160, :kph},
       out: [:vehicle, :car, :zone],
       out_position: [:vehicle, :car, :position],
       stale_after_ms: 1_200_000
