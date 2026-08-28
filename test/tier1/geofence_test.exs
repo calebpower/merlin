@@ -248,4 +248,113 @@ defmodule Merlin.GeofenceProcessTest do
       assert zone(paths) == :home, "a two-component observation was crossed"
     end
   end
+
+  describe "a fix stops being an answer once somewhere else is reachable" do
+    # THE OVERNIGHT REGRESSION.
+    #
+    # A phone went flat at a workshop at 23:23. Its owner drove home. At 00:27
+    # a door opened and the intruder latch fired on him entering his own house,
+    # because the zone still read `workshop` an hour after anyone could
+    # possibly have known that.
+    #
+    # Staleness was checked when a position was READ, and nothing re-read it as
+    # time passed -- so a dead phone's last zone stood for ever. The fix is a
+    # scheduled wake-up: when the window lapses with no new fix, the geofence
+    # publishes :unknown on its own.
+    setup do
+      # Two zones a known distance apart, and a speed that makes the window
+      # short enough to test without waiting minutes.
+      here = {51.4779, -0.0015}
+      # ~450 m north.
+      there = {51.4779 + 450.0 / 111_320.0, -0.0015}
+
+      Merlin.Config.put(%{
+        zones:
+          Zones.compile([
+            %{id: :here, center: here, radius: {50, :m}},
+            %{id: :there, center: there, radius: {50, :m}}
+          ]),
+        rules: [],
+        groups: %{},
+        sources: [],
+        derived: []
+      })
+
+      %{here: here, there: there}
+    end
+
+    defp start_with_speed(id, paths, speed) do
+      spec = %{
+        id: id,
+        kind: :geofence,
+        lat: paths.lat,
+        lon: paths.lon,
+        accuracy: paths.accuracy,
+        max_accuracy_m: 100,
+        max_speed: speed,
+        out: paths.out
+      }
+
+      {:ok, pid} = Derive.Geofence.start_link(spec)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      pid
+    end
+
+    test "the zone expires with NO new fix arriving", %{id: id, paths: paths, here: here} do
+      # 400 m to the other zone's edge at 1 m/s is about 400 s... far too slow
+      # to test. At 400 m/s it is one second.
+      start_with_speed(id, paths, {400, :mps})
+
+      observe(paths, here, 5)
+      assert zone(paths) == :here
+
+      # Nothing further is posted. The phone is dead.
+      Process.sleep(1_400)
+
+      assert zone(paths) == :unknown,
+             "the zone stood after somewhere else became reachable -- a dead phone would " <>
+               "keep asserting where its owner used to be"
+    end
+
+    test "it does NOT expire while nowhere else is reachable", %{
+      id: id,
+      paths: paths,
+      here: here
+    } do
+      # 400 m at 1 m/s is 400 seconds; nothing should expire in one.
+      start_with_speed(id, paths, {1, :mps})
+
+      observe(paths, here, 5)
+      assert zone(paths) == :here
+
+      Process.sleep(1_200)
+
+      assert zone(paths) == :here,
+             "the zone expired while the subject could not have reached anywhere else"
+    end
+
+    test "a fresh fix restarts the window", %{id: id, paths: paths, here: here} do
+      start_with_speed(id, paths, {400, :mps})
+
+      observe(paths, here, 5)
+      Process.sleep(600)
+      # Still within the window, and a new fix arrives.
+      observe(paths, here, 5)
+      Process.sleep(600)
+
+      assert zone(paths) == :here, "a fresh fix did not reset the certainty window"
+    end
+
+    test "with no max_speed declared, nothing expires", %{id: id, paths: paths, here: here} do
+      # Backwards compatible: a geofence that does not declare a speed behaves
+      # exactly as before.
+      start_fence(id, paths)
+
+      observe(paths, here, 5)
+      assert zone(paths) == :here
+
+      Process.sleep(1_400)
+      assert zone(paths) == :here
+    end
+  end
 end
