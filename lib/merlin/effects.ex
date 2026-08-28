@@ -28,6 +28,7 @@ defmodule Merlin.Effects do
   require Logger
 
   alias Merlin.{Expr, World}
+  alias Merlin.Effects.Tap
 
   @type effect ::
           {:set_group, atom(), term()}
@@ -59,6 +60,17 @@ defmodule Merlin.Effects do
 
   Returns the effects performed, so a caller (and the smoke tier) can assert
   on what happened rather than inferring it.
+
+  Options:
+
+    * `:rule`    -- the rule id that produced these, for the log suffix
+    * `:source`  -- who caused it, overriding `:rule`. `{:rule, id}` or
+      `{:operator, who}`. An operator command passed as `rule: :tui` would
+      write a lie into the log; this is how it says what it actually was.
+    * `:dry_run` -- override the daemon's setting for these effects only
+    * `:cause`   -- causal opts from the change that triggered the rule
+
+  Every effect's fate is reported to `Merlin.Effects.Tap`.
   """
   @spec perform([effect()], keyword()) :: [effect()]
   def perform(effects, opts \\ []) do
@@ -73,7 +85,7 @@ defmodule Merlin.Effects do
     end
 
     dry? = Keyword.get(opts, :dry_run, Merlin.Config.dry_run?())
-    rule = Keyword.get(opts, :rule)
+    source = Keyword.get(opts, :source) || rule_source(Keyword.get(opts, :rule))
     # Causal chain, from the change that triggered the rule. Carried through so
     # a fact written in reaction is bounded by the writer's depth guard.
     cause = Keyword.get(opts, :cause, [])
@@ -81,23 +93,35 @@ defmodule Merlin.Effects do
     settling? = Merlin.Settle.settling?()
 
     Enum.each(effects, fn effect ->
-      cond do
-        dry? ->
-          Logger.info("[dry-run] #{describe(effect)}#{rule_suffix(rule)}")
+      # The outcome is computed rather than implied by which branch logged.
+      # It was always known here and never said; a reader of the log could
+      # tell dry-run from held only by the prefix, and could not tell a
+      # dispatch that succeeded from one that failed at all.
+      outcome =
+        cond do
+          dry? ->
+            Logger.info("[dry-run] #{describe(effect)}#{source_suffix(source)}")
+            :dry_run
 
-        settling? and Merlin.Settle.suppresses?(effect) ->
-          # Reported, never silent. A settle window you cannot see the workings
-          # of is indistinguishable from a daemon that has stopped acting, and
-          # the difference matters at 3am. Every held effect names itself, the
-          # rule that produced it, and how long is left.
-          Logger.info(
-            "[settling #{Merlin.Settle.remaining_ms()}ms] held: " <>
-              "#{describe(effect)}#{rule_suffix(rule)}"
-          )
+          settling? and Merlin.Settle.suppresses?(effect) ->
+            # Reported, never silent. A settle window you cannot see the
+            # workings of is indistinguishable from a daemon that has stopped
+            # acting, and the difference matters at 3am. Every held effect
+            # names itself, what produced it, and how long is left.
+            remaining = Merlin.Settle.remaining_ms()
 
-        true ->
-          do_perform(effect, rule, cause)
-      end
+            Logger.info(
+              "[settling #{remaining}ms] held: " <>
+                "#{describe(effect)}#{source_suffix(source)}"
+            )
+
+            {:held, remaining}
+
+          true ->
+            do_perform(effect, source, cause)
+        end
+
+      Tap.notify(outcome, effect, source)
     end)
 
     effects
@@ -162,54 +186,99 @@ defmodule Merlin.Effects do
 
   # --- performance ----------------------------------------------------------
 
-  defp do_perform({:set_group, group, value}, rule, _cause) do
+  # Every clause returns :performed or {:failed, reason}. They used to return
+  # whatever Logger.warning/1 happened to return, which meant the one thing
+  # the caller most wanted to know -- did it work -- was the one thing thrown
+  # away. A failed publish and a successful one were indistinguishable to
+  # anything but a human reading the log.
+  @spec do_perform(effect(), Merlin.Effects.Report.source(), keyword()) ::
+          :performed | {:failed, term()}
+
+  defp do_perform({:set_group, group, value}, source, _cause) do
     case Merlin.Groups.set(group, value) do
       :ok ->
-        :ok
+        :performed
 
       {:error, reason} ->
-        Logger.warning("rule #{inspect(rule)}: set group #{group} failed: #{inspect(reason)}")
+        Logger.warning("#{source_label(source)}: set group #{group} failed: #{inspect(reason)}")
+        {:failed, reason}
     end
   end
 
-  defp do_perform({:publish, topic, payload, opts}, rule, _cause) do
+  defp do_perform({:publish, topic, payload, opts}, source, _cause) do
     case Merlin.MQTT.Connection.publish(topic, payload, opts) do
       :ok ->
-        :ok
+        :performed
 
       {:error, reason} ->
-        Logger.warning("rule #{inspect(rule)}: publish #{topic} failed: #{inspect(reason)}")
+        Logger.warning("#{source_label(source)}: publish #{topic} failed: #{inspect(reason)}")
+        {:failed, reason}
     end
   end
 
-  defp do_perform({:set_fact, path, value}, rule, cause) do
+  defp do_perform({:set_fact, path, value}, source, cause) do
     # The causal opts are what make the writer's depth guard enforceable. A
     # rule reacting to a change writes at that change's depth + 1, so a cycle
     # between two rules trips the ceiling instead of spinning forever.
-    World.put(path, value, Keyword.merge(cause, source: {:rule, rule}))
+    #
+    # `source` reaches the fact, so an operator-written fact is distinguishable
+    # from a rule-written one for ever afterwards -- which is the difference
+    # between "the latch is fired because something happened" and "the latch is
+    # fired because somebody set it by hand at 2am".
+    case World.put(path, value, Keyword.merge(cause, source: source)) do
+      {:dropped, :max_depth} -> {:failed, :max_depth}
+      _changed_or_unchanged -> :performed
+    end
   end
 
-  defp do_perform({:notify, :discord, message}, rule, _cause) do
+  defp do_perform({:notify, :discord, message}, source, _cause) do
     case Merlin.Notify.Discord.send(message) do
-      :ok -> :ok
-      {:error, reason} -> Logger.warning("rule #{rule}: discord notify failed: #{inspect(reason)}")
+      :ok ->
+        :performed
+
+      {:error, reason} ->
+        Logger.warning("#{source_label(source)}: discord notify failed: #{inspect(reason)}")
+        {:failed, reason}
     end
   end
 
   # A channel that resolves to the log is how an alerting rule ships before it
   # is trusted to wake anyone. Both vehicle rules and the intruder latch use it.
-  defp do_perform({:notify, :log, message}, rule, _cause) do
-    Logger.warning("[notify] #{message}#{rule_suffix(rule)}")
+  defp do_perform({:notify, :log, message}, source, _cause) do
+    Logger.warning("[notify] #{message}#{source_suffix(source)}")
+    :performed
   end
 
-  defp do_perform({:notify, channel, message}, rule, _cause) do
-    Logger.warning("rule #{rule}: unknown notify channel #{inspect(channel)}: #{message}")
+  defp do_perform({:notify, channel, message}, source, _cause) do
+    Logger.warning(
+      "#{source_label(source)}: unknown notify channel #{inspect(channel)}: #{message}"
+    )
+
+    {:failed, {:unknown_channel, channel}}
   end
 
-  defp do_perform({:log, level, message}, rule, _cause) do
-    Logger.log(level, "#{message}#{rule_suffix(rule)}")
+  defp do_perform({:log, level, message}, source, _cause) do
+    Logger.log(level, "#{message}#{source_suffix(source)}")
+    :performed
   end
 
-  defp rule_suffix(nil), do: ""
-  defp rule_suffix(rule), do: " (#{rule})"
+  # --- attribution ----------------------------------------------------------
+
+  # `rule: :lamps_toggle` becomes `{:rule, :lamps_toggle}` so that everything
+  # downstream has one shape to match on, and the rendered suffix is unchanged
+  # -- " (lamps_toggle)" is what the soak runbook greps for.
+  defp rule_source(nil), do: nil
+  defp rule_source(rule), do: {:rule, rule}
+
+  @doc false
+  @spec source_suffix(Merlin.Effects.Report.source()) :: binary()
+  def source_suffix(nil), do: ""
+  def source_suffix({:rule, rule}), do: " (#{rule})"
+  def source_suffix({:operator, who}), do: " (operator #{who})"
+  def source_suffix(other), do: " (#{inspect(other)})"
+
+  defp source_label(nil), do: "effect"
+  defp source_label({:rule, rule}), do: "rule #{rule}"
+  defp source_label({:operator, who}), do: "operator #{who}"
+  defp source_label(other), do: inspect(other)
 end
