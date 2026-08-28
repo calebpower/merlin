@@ -247,6 +247,62 @@ defmodule Merlin.SimulatedHouseTest do
       assert Invariants.no_command_without_a_reason(clean) == []
     end
 
+    test "latch_only_fires_on_an_exterior_door catches a bedroom door alarm" do
+      broken = [
+        entry(1,
+          note: ~s(z2m/home/bedroom/sensor/contact {"state":"OFF"}),
+          facts: %{[:rule, :intruder_latch, :state] => :armed}
+        ),
+        entry(2,
+          note: ~s(z2m/home/bedroom/sensor/contact {"state":"ON"}),
+          facts: %{[:rule, :intruder_latch, :state] => :fired}
+        )
+      ]
+
+      assert [msg] =
+               Invariants.latch_only_fires_on_an_exterior_door(broken, [
+                 [:door, "front", :contact]
+               ])
+
+      assert msg =~ "bedroom"
+      assert msg =~ "not an exterior door"
+    end
+
+    test "latch_only_fires_on_an_exterior_door is quiet for the front door" do
+      clean = [
+        entry(1,
+          note: ~s(z2m/home/front/sensor/contact {"state":"OFF"}),
+          facts: %{[:rule, :intruder_latch, :state] => :armed}
+        ),
+        entry(2,
+          note: ~s(z2m/home/front/sensor/contact {"state":"ON"}),
+          facts: %{[:rule, :intruder_latch, :state] => :fired}
+        )
+      ]
+
+      assert Invariants.latch_only_fires_on_an_exterior_door(clean, [[:door, "front", :contact]]) ==
+               []
+    end
+
+    # An invariant checking membership against nothing passes everything. That
+    # is the "silently checks nothing" failure this project has now shipped
+    # twice, so it is asserted rather than assumed.
+    test "latch_only_fires_on_an_exterior_door refuses to pass on an empty group" do
+      timeline = [
+        entry(1,
+          note: ~s(z2m/home/front/sensor/contact {"state":"OFF"}),
+          facts: %{[:rule, :intruder_latch, :state] => :armed}
+        ),
+        entry(2,
+          note: ~s(z2m/home/front/sensor/contact {"state":"ON"}),
+          facts: %{[:rule, :intruder_latch, :state] => :fired}
+        )
+      ]
+
+      assert [msg] = Invariants.latch_only_fires_on_an_exterior_door(timeline, [])
+      assert msg =~ "no :exterior_doors members"
+    end
+
     # The meta-assertion. If someone adds an invariant and no self-test, this
     # notices -- otherwise the suite grows checks nobody has shown can fail.
     test "every invariant has a self-test that makes it fire" do
@@ -256,6 +312,7 @@ defmodule Merlin.SimulatedHouseTest do
           :ac_off_for_the_whole_cycle,
           :latch_never_fires_at_home,
           :latch_never_fires_on_a_lost_phone,
+          :latch_only_fires_on_an_exterior_door,
           :latch_stays_fired_until_home,
           :nothing_published_while_settling,
           :lamps_never_commanded_in_daylight,

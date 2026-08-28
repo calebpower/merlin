@@ -62,6 +62,7 @@ defmodule Merlin.Machine.Server do
   def init(%Machine{} = machine) do
     Enum.each(machine.watches, &Bus.subscribe/1)
     Enum.each(machine.watch_events, &Bus.subscribe_events/1)
+    Enum.each(machine.watch_groups, &Groups.subscribe/1)
 
     {initial, data} = restored(machine)
 
@@ -302,10 +303,8 @@ defmodule Merlin.Machine.Server do
     %{read: &read/1, trigger: trigger, locals: data, group: Groups.resolver()}
   end
 
-  defp trigger_env(%Change{} = c),
-    do: %{value: c.new, prev: c.old, path: c.path, first?: c.first?}
-
-  defp trigger_env(%Event{} = e), do: %{value: e.payload, path: e.path}
+  defp trigger_env(%Change{} = c), do: Change.trigger_env(c)
+  defp trigger_env(%Event{} = e), do: Event.trigger_env(e)
 
   defp read(path) do
     case World.fetch(path) do

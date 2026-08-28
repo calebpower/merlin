@@ -121,6 +121,22 @@ defmodule Merlin.MQTT.Router do
     end
   end
 
+  @doc """
+  The names a filter captures, in filter order.
+
+  Used by config validation to check a capture name against the reserved
+  `trigger.*` keys: a source with a `+value` wildcard would put "value" in the
+  captures map where `trigger.value` already means the changed value, and the
+  capture would be silently unreachable rather than wrong-and-loud.
+  """
+  @spec capture_names(binary()) :: [binary()]
+  def capture_names(filter) when is_binary(filter) do
+    filter
+    |> String.split("/")
+    |> Enum.flat_map(&capture_name/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
   # A bare "+" captures nothing; "+name" captures under that name. Order
   # matters here: the exact match must come first.
   defp capture_name("+"), do: [nil]

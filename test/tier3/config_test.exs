@@ -32,8 +32,22 @@ defmodule Merlin.ConfigSourceTest do
         do: action
   end
 
-  defp watches_any?(%Merlin.Rule{} = r), do: r.watches != [] or r.watch_events != []
-  defp watches_any?(%Merlin.Machine{} = m), do: m.watches != [] or m.watch_events != []
+  # watch_groups counts. A rule whose only trigger is {:changes_in, group}
+  # subscribes through the group's members and has no watches of its own, so
+  # omitting it here would report a live rule as one that can never fire.
+  defp watches_any?(%Merlin.Rule{} = r),
+    do: r.watches != [] or r.watch_events != [] or r.watch_groups != []
+
+  defp watches_any?(%Merlin.Machine{} = m),
+    do: m.watches != [] or m.watch_events != [] or m.watch_groups != []
+
+  defp triggers_of(%Merlin.Rule{triggers: triggers}), do: triggers
+
+  defp triggers_of(%Merlin.Machine{states: states}) do
+    for {_state, clauses} <- states,
+        %Merlin.Machine.Clause{trigger: trigger} <- clauses,
+        do: trigger
+  end
 
   # The real file, not a fixture.
   @config_path Path.expand("../../priv/example.exs", __DIR__)
@@ -93,11 +107,61 @@ defmodule Merlin.ConfigSourceTest do
       end
     end
 
-    test "every group has members and a set topic", %{config: config} do
+    test "every group has members", %{config: config} do
       for {id, group} <- config.groups do
         assert group.members != [], "group #{id} has no members"
-        assert is_binary(group.set_topic), "group #{id} has no set_topic"
       end
+    end
+
+    test "every group a rule commands declares somewhere to publish", %{config: config} do
+      # set_topic is optional, because a group is a named SET of facts first
+      # and a command target second -- :exterior_doors has members and nothing
+      # to publish to. What must hold is the pairing: anything commanded has a
+      # topic.
+      for rule <- config.rules, {:set_group, group, _} <- actions_of(rule) do
+        assert is_binary(config.groups[group][:set_topic]),
+               "rule #{rule.id} commands #{inspect(group)}, which has no set_topic"
+      end
+    end
+
+    test "every group a rule triggers on exists", %{config: config} do
+      for rule <- config.rules, {:changes_in, group} <- triggers_of(rule) do
+        assert Map.has_key?(config.groups, group),
+               "rule #{rule.id} triggers on unknown group #{inspect(group)}"
+      end
+    end
+
+    test "the intruder latch selects doors by name, not by prefix", %{config: config} do
+      # The regression this whole change exists to prevent. Under
+      # {:changes_under, [:door]} the latch alarmed on the bedroom and office
+      # doors, because interior and exterior doors have identically shaped
+      # paths and a prefix can only select on shape.
+      latch = Enum.find(config.rules, &(&1.id == :intruder_latch))
+      triggers = triggers_of(latch)
+
+      refute {:changes_under, [:door]} in triggers,
+             "the latch is back on the bare [:door] prefix: it will alarm on interior doors"
+
+      assert Enum.any?(triggers, &match?({:changes_in, _}, &1)),
+             "the intruder latch no longer names a group of doors"
+    end
+
+    test "the exterior door group holds door contacts", %{config: config} do
+      members = config.groups[:exterior_doors][:members]
+
+      assert members != []
+
+      for path <- members do
+        assert match?([:door, _room, :contact], path),
+               "#{inspect(path)} is in :exterior_doors but is not a door contact"
+      end
+
+      # A group listing every door is the prefix trigger wearing a different
+      # hat, and it would pass every other assertion here.
+      doors_source = Enum.find(config.sources, &(&1.id == :doors))
+
+      assert doors_source,
+             "the exterior door group is meaningless without the source that produces doors"
     end
 
     test "every source topic is a compilable MQTT filter", %{config: config} do
@@ -464,6 +528,144 @@ defmodule Merlin.ConfigSourceTest do
       config = %{sources: [%{id: :s, topic: "a/#/b"}], groups: [], rules: []}
       assert {:error, errors} = Config.File.validate(config)
       assert Enum.any?(errors, &match?({:bad_topic_filter, :s, _, _}, &1))
+    end
+
+    test "a rule triggering on an unknown group" do
+      config = %{
+        groups: [],
+        rules: [
+          %{id: :r, desc: "x", on: [{:changes_in, :nope}], do: [{:log, :info, "hi"}]}
+        ]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert Enum.any?(errors, &match?({:unknown_group, :r, :nope, _}, &1))
+    end
+
+    test "a machine triggering on an unknown group is caught inside its clauses" do
+      # A check that only walked top-level triggers would pass this, and the
+      # intruder latch is a machine -- so the one rule this trigger was added
+      # for would be the one rule the validator did not cover.
+      config = %{
+        groups: [],
+        rules: [
+          %{
+            id: :m,
+            desc: "x",
+            machine: %{
+              initial: :armed,
+              states: %{
+                armed: [%{on: {:changes_in, :nope}, do: [{:log, :info, "hi"}], goto: :armed}]
+              }
+            }
+          }
+        ]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert Enum.any?(errors, &match?({:unknown_group, :m, :nope, _}, &1))
+    end
+
+    test "commanding a group that declares no set_topic" do
+      config = %{
+        groups: [%{id: :set_only, members: [[:door, "front", :contact]]}],
+        rules: [
+          %{id: :r, desc: "x", on: [{:changes, [:a]}], do: [{:set_group, :set_only, :off}]}
+        ]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert Enum.any?(errors, &match?({:group_not_commandable, :r, :set_only}, &1))
+    end
+
+    test "a group with no set_topic is fine when nothing commands it" do
+      config = %{
+        groups: [%{id: :set_only, members: [[:door, "front", :contact]]}],
+        rules: [
+          %{id: :r, desc: "x", on: [{:changes_in, :set_only}], do: [{:log, :info, "hi"}]}
+        ],
+        sources: []
+      }
+
+      assert {:ok, _} = Config.File.validate(config)
+    end
+
+    test "a set_topic that is not a string is still refused" do
+      config = %{
+        groups: [%{id: :g, set_topic: :not_a_topic, members: [[:a]]}],
+        rules: []
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert Enum.any?(errors, &match?({:group_bad_set_topic, :g, :not_a_topic}, &1))
+    end
+
+    test "a topic capture named after a built-in trigger key is refused" do
+      # It would land in the captures map that Merlin.Expr consults only after
+      # the built-in keys, so trigger.value would keep meaning the changed
+      # value and the capture would be silently unreachable.
+      config = %{
+        sources: [%{id: :s, topic: "z2m/+value/state"}],
+        groups: [],
+        rules: []
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert Enum.any?(errors, &match?({:capture_shadows_trigger_key, :s, "value"}, &1))
+    end
+
+    test "an ordinary capture name is accepted" do
+      config = %{sources: [%{id: :s, topic: "z2m/+room/state"}], groups: [], rules: []}
+      assert {:ok, _} = Config.File.validate(config)
+    end
+
+    test "a literal string that reads like an expression is refused" do
+      # The mistake this catches was made while writing the door rules: the
+      # {:expr, ...} wrapper was omitted, so the latch would have logged its
+      # own source text -- quotes, operators and all -- and kept working.
+      config = %{
+        groups: [],
+        rules: [
+          %{
+            id: :r,
+            desc: "x",
+            on: [{:changes, [:a]}],
+            do: [{:notify, :log, "a door moved: to_s(trigger.room)"}]
+          }
+        ]
+      }
+
+      assert {:error, errors} = Config.File.validate(config)
+      assert Enum.any?(errors, &match?({:literal_looks_like_an_expression, :r, _}, &1))
+    end
+
+    test "the same string wrapped as an expression is accepted" do
+      config = %{
+        groups: [],
+        sources: [],
+        rules: [
+          %{
+            id: :r,
+            desc: "x",
+            on: [{:changes, [:a]}],
+            do: [{:notify, :log, {:expr, "to_s(trigger.room, \"unnamed\")"}}]
+          }
+        ]
+      }
+
+      assert {:ok, _} = Config.File.validate(config)
+    end
+
+    test "an ordinary message is not flagged" do
+      config = %{
+        groups: [],
+        sources: [],
+        rules: [
+          %{id: :r, desc: "x", on: [{:changes, [:a]}], do: [{:log, :info, "the door moved"}]}
+        ]
+      }
+
+      assert {:ok, _} = Config.File.validate(config)
     end
 
     test "a group with no members" do
