@@ -24,18 +24,23 @@ a haversine comparison against a radius with hysteresis. A rule knows only that
 conversion appearing anywhere outside an adapter is a bug in the layering.
 
 ```
-transports     MQTT · HTTP ingress · pollers          bytes
+TRANSPORTS     MQTT · HTTP ingress · pollers            bytes in
     v
-ADAPTERS       protocol -> semantic facts/events      CODE
+ADAPTERS       protocol -> semantic facts/events        CODE
     v
-FACT STORE     ETS + single writer; levels vs events
+FACT STORE     ETS + single writer; levels vs events    CODE
     v
-DERIVED FACTS  declared computations over facts       DATA
+DERIVED FACTS  declared computations over facts         DATA
     v
-RULES          one :gen_statem per stateful rule      DATA
+RULES          one :gen_statem per stateful rule        DATA
     v
-EFFECTS        resolved effects -> intents -> adapters
+EFFECTS        resolved effects -> intents -> adapters  CODE
 ```
+
+The right-hand column is the whole point. Two layers are things you *write in
+a config file*; the rest is compiled. If you find yourself wanting to put a
+topic in the DATA rows or a house rule in the CODE rows, the layering has
+slipped.
 
 ### Levels and events
 
@@ -55,9 +60,11 @@ rather than reporting a stale value as current — which is the difference
 between "the car is at home" and "the car was at home when the tracker last
 spoke, four hours ago".
 
-## Configuration
+## Configuring it
 
-One file, evaluated to a plain map and validated before anything starts:
+Everything about your house is one file — an Elixir map, evaluated at boot and
+validated before anything starts. `priv/example.exs` is a complete, working
+house; copy it and edit. Every snippet below is lifted from it.
 
 | Key | What it declares |
 |---|---|
@@ -74,6 +81,294 @@ One file, evaluated to a plain map and validated before anything starts:
 Validation collects every error rather than stopping at the first, and refuses
 unknown keys with a "did you mean". A typo is a refusal to boot, not a daemon
 that starts successfully and quietly does nothing.
+
+### 1. Start with the infrastructure
+
+```elixir
+%{
+  mqtt: %{host: "localhost", port: 1883},
+  api: %{port: 8080},
+
+  # Log every effect instead of performing it. Ship TRUE. The first thing a
+  # new daemon should do is tell you what it *would* have done.
+  dry_run: true,
+
+  # After boot and after every broker reconnect, learn without acting.
+  # Retained messages replay in a burst and look exactly like the whole house
+  # changing at once; without this your alarms fire every time wifi hiccups.
+  settle_ms: 15_000,
+
+  # ... the rest below goes here
+}
+```
+
+### 2. Find out what your devices actually say
+
+Do not guess topics. Watch the broker:
+
+```sh
+mosquitto_sub -h localhost -t '#' -v
+```
+
+Press a button, open a door, and read back the topic and payload verbatim.
+Getting this wrong is silent — merlin binds a topic nothing ever publishes to
+and simply never learns the fact.
+
+### 3. Turn a topic into a fact
+
+A **source** binds one topic filter and says what to pull out of the payload.
+`from:` is a path into the decoded body; `codec:` maps the wire value onto the
+vocabulary your rules use.
+
+```elixir
+sources: [
+  %{
+    id: :lamp_one,
+    topic: "z2m/home/living_room/plug/lamp_1",
+    decode: :json,
+    facts: [
+      %{
+        path: [:lamp, :living_room, :one, :power],
+        from: [["state"]],
+        codec: {:enum, %{"ON" => :on, "OFF" => :off}}
+      }
+    ]
+  }
+]
+```
+
+That gives you the fact `lamp.living_room.one.power`, which is what a rule
+refers to. Codecs available: `:raw`, `:json`, `:integer`, `:float`,
+`{:enum, %{"ON" => :on}}`, `{:truthy, if_true, if_false}`,
+`{:json_path, path, inner}`, and `{:enum_value, mapping}`.
+
+**Momentary things are events, not facts.** A button press has no resting
+value, so declare it under `events:` and it is delivered every time rather
+than deduplicated:
+
+```elixir
+%{
+  id: :living_room_button,
+  topic: "z2m/home/living_room/switch/lamps/action",
+  decode: :raw,
+  events: [
+    %{
+      path: [:button, :living_room, :pressed],
+      codec: {:enum, %{"single" => :single, "double" => :double}}
+    }
+  ]
+}
+```
+
+**One source can cover many devices.** A `+name` wildcard captures a topic
+segment into the fact path, and the captured value is readable in a rule as
+`trigger.name`:
+
+```elixir
+%{
+  id: :doors,
+  topic: "z2m/home/+room/sensor/contact",
+  decode: :json,
+  facts: [
+    %{
+      path: [:door, {:capture, "room"}, :contact],
+      from: [["contact"]],
+      codec: {:truthy, :closed, :open}
+    }
+  ]
+}
+```
+
+### 4. Name sets of things
+
+A **group** is a named set of fact paths. With a `set_topic` it is also
+something you can command; without one it is purely a set to read.
+
+```elixir
+groups: [
+  %{
+    id: :living_room_lamps,
+    members: [[:lamp, :living_room, :one, :power], [:lamp, :living_room, :two, :power]],
+    set_topic: "z2m/living_room_lamps/set",
+    encode: {:json_state, %{on: "ON", off: "OFF"}}
+  },
+
+  # Members only. Nothing is published to "the exterior doors" -- this exists
+  # so a rule can say which doors matter without naming a path shape.
+  %{
+    id: :exterior_doors,
+    members: [[:door, "front", :contact], [:door, "back", :contact]]
+  }
+]
+```
+
+### 5. Declare where places are
+
+```elixir
+zones: [
+  %{id: :home, center: {51.4779, -0.0015}, radius: {0.25, :mi}, hysteresis: 1.25},
+  %{id: :workshop, center: {51.5537, -0.0708}, radius: {0.25, :mi}}
+],
+
+# Separate from any zone radius: "is the car with my phone" is a different
+# question from "how big is my house".
+colocation_distance: {0.25, :mi},
+```
+
+`hysteresis: 1.25` means you leave at 1.25× the radius you arrived at. It is
+not optional in practice — without it a phone parked on the boundary with poor
+GPS flaps between states and toggles your lights all evening.
+
+### 6. Compute facts from other facts
+
+A **derived** fact is a declared computation. Four kinds: `:expr`,
+`:geofence`, `:sun`, `:http_poll`.
+
+```elixir
+derived: [
+  %{
+    id: :vehicle_with_phone,
+    kind: :expr,
+    out: [:vehicle, :car, :with_phone?],
+    compute: "within?(vehicle.car.position, person.owner.position, 402.34)"
+  },
+
+  %{
+    id: :owner_zone,
+    kind: :geofence,
+    lat: [:person, :owner, :lat],
+    lon: [:person, :owner, :lon],
+    accuracy: [:person, :owner, :accuracy_m],
+    max_accuracy_m: 100,
+    max_speed: {120, :kph},
+    out: [:person, :owner, :zone],
+    out_position: [:person, :owner, :position],
+    stale_after_ms: 1_800_000
+  }
+]
+```
+
+`out_position` is what makes `person.owner.position` exist — the `:expr`
+above reads it. `max_speed` decides how long a fix stays an *answer*: once
+somewhere else has been reachable for longer than the fix is old, the zone
+becomes `:unknown` rather than standing forever.
+
+Subscriptions are derived from the expression, so there is no watch list to
+keep in step — change the expression and what it listens to follows.
+
+Add `hold: {:true_for, {2, :minute}}` to require a condition to stay true
+before the fact flips. Going false is immediate: an alarm should be slow to
+fire and quick to clear.
+
+### 7. Write the rules
+
+A **stateless rule** is a trigger, an optional guard, and actions.
+
+```elixir
+rules: [
+  %{
+    id: :lamps_toggle,
+    desc: "A single press toggles the living room lamps: off only when both are on.",
+    on: [{:receives, [:button, :living_room, :pressed]}],
+    when: "trigger.value == :single",
+    do: [
+      {:set_group, :living_room_lamps,
+       {:expr, "if(all_eq?(:living_room_lamps, :on), :off, :on)"}}
+    ]
+  }
+]
+```
+
+Triggers: `{:changes, path}`, `{:changes_under, prefix}`,
+`{:changes_in, group}`, `{:enters, path, value}`, `{:leaves, path, value}`,
+`{:receives, event_path}`.
+
+Actions: `{:set_group, group, value}`, `{:publish, topic, payload}`,
+`{:set_fact, path, value}`, `{:log, level, message}`,
+`{:notify, channel, message}`.
+
+Any action value may be `{:expr, "..."}` instead of a literal. **Forget the
+`{:expr, ...}` wrapper and your string is used verbatim** — the validator
+refuses a literal containing `trigger.` or `local.` for exactly that reason.
+
+A **stateful rule** is a machine: named states, each with clauses. It is what
+you want for latches, timed sequences and anything that must remember.
+
+```elixir
+%{
+  id: :intruder_latch,
+  desc: "If an exterior door moves while I am away, log once. Re-arm when I get home.",
+  machine: %{
+    initial: :armed,
+    persist: true,          # a latch that forgets on restart is not a latch
+    states: %{
+      armed: [
+        %{
+          on: {:changes_in, :exterior_doors},
+          when: "defined?(person.owner.zone) and person.owner.zone != :home",
+          do: [{:notify, :log, {:expr, "\"activity at home: \" + to_s(trigger.room, \"a door\")"}}],
+          goto: :fired
+        }
+      ],
+      fired: [
+        %{on: {:enters, [:person, :owner, :zone], :home}, do: [{:log, :info, "re-armed"}], goto: :armed}
+      ]
+    }
+  }
+}
+```
+
+### 8. What you can write in an expression
+
+Facts by dotted path (`person.owner.zone`), `trigger.value` / `trigger.prev` /
+`trigger.path` / `trigger.<capture>`, and `local.<slot>` inside a machine.
+
+Operators: `== != < <= > >= and or not in + - * /`. Builtins: `if/3`,
+`defined?/1`, `unknown?/1`, `all_eq?/2`, `any_eq?/2`, `count_eq/2`,
+`distance/2`, `within?/3`, `to_s/1`, `to_s/2`, `abs/1`.
+
+Two traps worth knowing before you write a guard:
+
+* **Never compare against `:unknown`.** Every operator propagates it, so
+  `x != :unknown` is permanently `:unknown` and the rule never fires. Use
+  `defined?(x)`. The compiler now refuses the broken spelling.
+* **`to_s/1` propagates `:unknown` too**, and an action whose message resolves
+  to `:unknown` is skipped entirely. In an alert, that means losing the name
+  loses the alert. Use `to_s(value, "fallback")`.
+
+### 9. Secrets, separately
+
+Credentials never go in this file. Reference them and put the values in
+`merlin.secrets.exs`, mode 0600:
+
+```elixir
+# in merlin.exs
+auth: [url: {:secret, :hapn_auth_endpoint}, client_id: {:secret, :hapn_client_id}]
+```
+
+```elixir
+# in merlin.secrets.exs -- see priv/merlin.secrets.exs.example
+%{
+  hapn_auth_endpoint: "https://REPLACE/oauth/token",
+  hapn_client_id: "REPLACE",
+  discord_webhook: "https://discord.com/api/webhooks/REPLACE/REPLACE"
+}
+```
+
+merlin refuses to start if a referenced secret is missing, or if the secrets
+file is readable by anyone else.
+
+### 10. Check it before you run it
+
+```sh
+MERLIN_CONFIG=./my-house.exs /usr/local/merlin/current/bin/merlin-preflight
+```
+
+This is the test suite for a house. It parses and fully validates the config,
+resolves every secret, checks the derived graph for cycles, refuses a guard
+naming a zone you never declared, opens the database, connects to the broker
+and binds the ports. It is the same command rc.d runs before every start, so a
+config that passes here is one the daemon will accept.
 
 ## Installing
 
@@ -134,11 +429,13 @@ install -o root   -g merlin -m 0640 my-house.exs  /usr/local/etc/merlin/merlin.e
 install -o merlin -g merlin -m 0600 my-secrets.exs /usr/local/etc/merlin/merlin.secrets.exs
 ```
 
-Start from `priv/example.exs` and `priv/merlin.secrets.exs.example`. The
-secrets file is checked for mode 0600 at boot and merlin refuses to start if
-anyone else can read it. The config file is *evaluated*, so it is at the same
-trust level as the release itself — never point `MERLIN_CONFIG` at anything you
-did not write.
+See **[Configuring it](#configuring-it)** for how to write the house file;
+start from `priv/example.exs` and `priv/merlin.secrets.exs.example`.
+
+The secrets file is checked for mode 0600 at boot and merlin refuses to start
+if anyone else can read it. The config file is *evaluated*, so it is at the
+same trust level as the release itself — never point `MERLIN_CONFIG` at
+anything you did not write.
 
 ### 5. rc.d and logging
 
@@ -301,7 +598,7 @@ and anything a reasonable person would call an algorithm is a module by
 definition — the geofence, the travel-time bound, the OAuth2 token lifecycle
 and the four rule executors all are.
 
-## Licence
+## License
 
 Copyright 2026 Caleb L. Power
 
@@ -315,10 +612,10 @@ the ones named in `mix.exs`: twenty are Apache-2.0, and `bandit`, `exqlite`,
 `finch`, `thousand_island` and `websock` are MIT.
 
 The audit is meaningful only because `mix.lock` is committed. Without a lock
-the tree resolves afresh on every build, and a statement about its licences
+the tree resolves afresh on every build, and a statement about its licenses
 would be a statement about whatever happened to install that day.
 
-There are no per-file licence headers. Apache-2.0 recommends them and does not
+There are no per-file license headers. Apache-2.0 recommends them and does not
 require them, and in this codebase the top of every module is a `@moduledoc`
 carrying the reasoning for what is below it — five lines of boilerplate above
 each one would bury the thing most worth reading.
