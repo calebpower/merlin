@@ -108,11 +108,16 @@ defmodule Merlin.Config.File do
 
     case {errors, compile_rules(term)} do
       {[], {:ok, rules}} ->
-        group_ids = term |> Map.get(:groups, []) |> MapSet.new(& &1.id)
+        groups = Map.get(term, :groups, [])
+        group_ids = MapSet.new(groups, & &1.id)
+
+        commandable_ids =
+          for g <- groups, is_binary(Map.get(g, :set_topic)), into: MapSet.new(), do: g.id
 
         zone_ids = term |> Map.get(:zones, []) |> MapSet.new(& &1[:id])
 
-        case rule_reference_errors(rules, group_ids) ++ zone_errors(term, rules, zone_ids) do
+        case rule_reference_errors(rules, group_ids, commandable_ids) ++
+               zone_errors(term, rules, zone_ids) do
           [] -> {:ok, build(term, rules)}
           refs -> {:error, refs}
         end
@@ -149,11 +154,25 @@ defmodule Merlin.Config.File do
     |> Map.get(:groups, [])
     |> Enum.flat_map(fn group ->
       cond do
-        not is_map(group) -> [{:bad_group, group}]
-        not is_atom(Map.get(group, :id)) -> [{:group_missing_id, group}]
-        not is_binary(Map.get(group, :set_topic)) -> [{:group_missing_set_topic, group.id}]
-        Map.get(group, :members, []) == [] -> [{:group_has_no_members, group.id}]
-        true -> []
+        not is_map(group) ->
+          [{:bad_group, group}]
+
+        not is_atom(Map.get(group, :id)) ->
+          [{:group_missing_id, group}]
+
+        # Optional, not absent: a group is a named set of facts first, and a
+        # command target only if it declares where to send. `:exterior_doors`
+        # has members and nothing to publish to. What is NOT allowed is a
+        # set_topic that is not a topic -- see set_group below for the other
+        # half, which refuses to command a group that cannot be commanded.
+        not (is_nil(Map.get(group, :set_topic)) or is_binary(Map.get(group, :set_topic))) ->
+          [{:group_bad_set_topic, group.id, Map.get(group, :set_topic)}]
+
+        Map.get(group, :members, []) == [] ->
+          [{:group_has_no_members, group.id}]
+
+        true ->
+          []
       end
     end)
   end
@@ -176,11 +195,33 @@ defmodule Merlin.Config.File do
           # A filter that will not compile is a boot failure, not a runtime
           # surprise on the first message that would have matched it.
           case Merlin.MQTT.Router.add(Merlin.MQTT.Router.new(), source.topic, :x) do
-            {:ok, _} -> []
+            {:ok, _} -> shadowed_captures(source)
             {:error, reason} -> [{:bad_topic_filter, source.id, source.topic, reason}]
           end
       end
     end)
+  end
+
+  # The keys `trigger.*` already means. A capture sharing one of these names
+  # would land in the captures map that `Merlin.Expr` consults only *after*
+  # the built-in keys, so `trigger.value` would keep meaning the changed value
+  # and the capture would be unreachable -- silently, which is the failure mode
+  # this file exists to prevent.
+  #
+  # Kept beside the reader deliberately: this is the "two things that must
+  # agree" shape, and the test in tier 1 asserts the two lists match rather
+  # than trusting a comment to keep them in step.
+  @reserved_trigger_keys ~w(value prev path first? captures)
+
+  @doc "The `trigger.*` keys a capture name may not shadow."
+  @spec reserved_trigger_keys() :: [binary()]
+  def reserved_trigger_keys, do: @reserved_trigger_keys
+
+  defp shadowed_captures(source) do
+    source.topic
+    |> Merlin.MQTT.Router.capture_names()
+    |> Enum.filter(&(&1 in @reserved_trigger_keys))
+    |> Enum.map(&{:capture_shadows_trigger_key, source.id, &1})
   end
 
   defp zones_errors(term) do
@@ -206,6 +247,12 @@ defmodule Merlin.Config.File do
        do: true
 
   defp valid_point?(_), do: false
+
+  defp valid_speed?({n, unit}) when is_number(n) and n > 0 and unit in [:mps, :kph, :mph],
+    do: true
+
+  defp valid_speed?(n) when is_number(n) and n > 0, do: true
+  defp valid_speed?(_), do: false
 
   defp valid_radius?({n, unit}) when is_number(n) and n > 0 and unit in [:m, :ft, :mi, :km],
     do: true
@@ -341,6 +388,10 @@ defmodule Merlin.Config.File do
         produced_paths(d) == :error ->
           [{:derived_missing_out, d[:id]}]
 
+        Map.get(d, :kind) == :geofence and Map.has_key?(d, :max_speed) and
+            not valid_speed?(d.max_speed) ->
+          [{:bad_max_speed, d.id, d.max_speed}]
+
         d.kind == :expr ->
           hold_errors(d) ++
             case Merlin.Expr.compile(Map.get(d, :compute, "")) do
@@ -413,19 +464,74 @@ defmodule Merlin.Config.File do
 
   # Every group a rule commands must exist. This is the check that turns a
   # typo'd group name from a silent no-op into a refusal to start.
-  defp rule_reference_errors(rules, group_ids) do
+  defp rule_reference_errors(rules, group_ids, commandable_ids) do
     Enum.flat_map(rules, fn rule ->
-      rule
-      |> all_actions()
-      |> Enum.flat_map(fn
-        {:set_group, group, _} ->
-          if MapSet.member?(group_ids, group),
-            do: [],
-            else: [{:unknown_group, rule.id, group, MapSet.to_list(group_ids)}]
+      action_errors =
+        rule
+        |> all_actions()
+        |> Enum.flat_map(fn
+          {:set_group, group, _} ->
+            cond do
+              not MapSet.member?(group_ids, group) ->
+                [{:unknown_group, rule.id, group, MapSet.to_list(group_ids)}]
 
-        _ ->
+              # A group with members and no set_topic is a legal set and an
+              # illegal command target. Commanding one would publish nowhere
+              # and log an error per firing, for ever.
+              not MapSet.member?(commandable_ids, group) ->
+                [{:group_not_commandable, rule.id, group}]
+
+              true ->
+                []
+            end
+
+          _ ->
+            []
+        end)
+
+      trigger_errors =
+        rule
+        |> all_triggers()
+        |> Enum.flat_map(fn
+          {:changes_in, group} ->
+            if MapSet.member?(group_ids, group),
+              do: [],
+              else: [{:unknown_group, rule.id, group, MapSet.to_list(group_ids)}]
+
+          _ ->
+            []
+        end)
+
+      action_errors ++ trigger_errors ++ literal_expression_errors(rule)
+    end)
+  end
+
+  # A literal string where an expression was meant.
+  #
+  # `{:notify, :log, "to_s(trigger.room)"}` is legal data: it logs that text
+  # verbatim, quotes and operators and all, and nothing anywhere complains.
+  # The `{:expr, ...}` wrapper is one easy keystroke to omit and the result is
+  # a rule that keeps working while saying something meaningless -- which is
+  # the exact failure shape this file exists to convert into a refusal to boot.
+  #
+  # The signal is deliberately narrow: `trigger.` and `local.` are the two
+  # scoped roots of the expression language and appear in no English sentence.
+  # A message mentioning a fact path is NOT flagged, because "the office plug"
+  # is prose and `office.plug` in a literal is far likelier to be intentional
+  # than these are.
+  defp literal_expression_errors(rule) do
+    rule
+    |> all_actions()
+    |> Enum.flat_map(fn
+      {_verb, _target, {:lit, text}} when is_binary(text) ->
+        if String.contains?(text, "trigger.") or String.contains?(text, "local.") do
+          [{:literal_looks_like_an_expression, rule.id, text}]
+        else
           []
-      end)
+        end
+
+      _ ->
+        []
     end)
   end
 
@@ -480,6 +586,18 @@ defmodule Merlin.Config.File do
         %Merlin.Machine.Clause{guard: guard} <- clauses,
         guard != nil,
         do: guard
+  end
+
+  # Same shape as all_guards/1 and all_actions/1, and for the same reason: a
+  # machine keeps its triggers inside each clause of each state, so a check
+  # that only walked the top level would pass a typo'd group in the intruder
+  # latch -- which is precisely the rule this trigger was added for.
+  defp all_triggers(%Merlin.Rule{triggers: triggers}), do: triggers
+
+  defp all_triggers(%Merlin.Machine{states: states}) do
+    for {_state, clauses} <- states,
+        %Merlin.Machine.Clause{trigger: trigger} <- clauses,
+        do: trigger
   end
 
   defp all_actions(%Merlin.Rule{actions: actions}), do: actions
@@ -541,6 +659,11 @@ defmodule Merlin.Config.File do
   defp describe({:duplicate_producer, path, ids}),
     do: "#{path} is written by more than one derived fact: #{Enum.map_join(ids, ", ", &inspect/1)}"
 
+  defp describe({:bad_max_speed, id, speed}),
+    do:
+      "#{inspect(id)} declares max_speed: #{inspect(speed)}, which is not a positive speed. " <>
+        "Use {120, :kph}, {75, :mph} or {33, :mps}."
+
   defp describe({:unknown_zone, where, zone, declared}),
     do:
       "#{inspect(where)} compares a zone against #{inspect(zone)}, which this house does " <>
@@ -553,7 +676,29 @@ defmodule Merlin.Config.File do
   defp describe({:not_plain_data, message}), do: message
 
   defp describe({:unknown_group, rule_id, group, known}),
-    do: "rule #{rule_id} commands unknown group #{inspect(group)} (known: #{inspect(known)})"
+    do: "rule #{rule_id} references unknown group #{inspect(group)} (known: #{inspect(known)})"
+
+  defp describe({:group_not_commandable, rule_id, group}),
+    do:
+      "rule #{rule_id} commands group #{inspect(group)}, which declares no set_topic. " <>
+        "A group without one is a named set of facts, readable by any_eq?/2 and " <>
+        "{:changes_in, #{inspect(group)}}, but there is nowhere to publish the command."
+
+  defp describe({:literal_looks_like_an_expression, rule_id, text}),
+    do:
+      "rule #{rule_id} has a literal string containing #{inspect(text)}, which reads like " <>
+        "an expression. A literal is logged verbatim; wrap it as {:expr, \"...\"} if you " <>
+        "meant it to be evaluated."
+
+  defp describe({:group_bad_set_topic, id, topic}),
+    do: "group #{id}: set_topic #{inspect(topic)} is not a topic string"
+
+  defp describe({:capture_shadows_trigger_key, id, name}),
+    do:
+      "source #{id}: topic capture +#{name} shadows the built-in trigger.#{name}, so " <>
+        "trigger.#{name} would keep its built-in meaning and the capture would be " <>
+        "unreachable. Rename the wildcard. Reserved: " <>
+        Enum.map_join(@reserved_trigger_keys, ", ", &"trigger.#{&1}")
 
   defp describe({:missing_secret, name}),
     do: "secret #{inspect(name)} is referenced by the config but not defined in #{Merlin.Secrets.path()}"

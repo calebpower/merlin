@@ -17,8 +17,8 @@ set -eu
 . "$(dirname "$0")/lib.sh"
 merlin_export_caches
 
-REL="$MIX_BUILD_ROOT/prod/rel/merlin"
-[ -x "$REL/bin/merlin" ] || die "no release at $REL -- did build.sh run?"
+REL="$MIX_BUILD_ROOT/prod/rel/merlind"
+[ -x "$REL/bin/merlind" ] || die "no release at $REL -- did build.sh run?"
 
 MERLIN_STATE_DIR="$REAPER_STATE/merlin"
 export MERLIN_STATE_DIR
@@ -90,7 +90,7 @@ cleanup() {
     # against.
     find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec cat {} + \
         > "$REAPER_OUT/smoke-daemon.log" 2>/dev/null || true
-    "$REL/bin/merlin" stop >/dev/null 2>&1 || true
+    "$REL/bin/merlind" stop >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -127,7 +127,7 @@ done
 say "preflight checked config, rules, secrets, database, broker, listeners and crypto"
 
 say "starting the release"
-"$REL/bin/merlin" daemon || die "release failed to start"
+"$REL/bin/merlind" daemon || die "release failed to start"
 
 # ---------------------------------------------------------------------------
 # The settle window (bug 8).
@@ -145,7 +145,7 @@ say "starting the release"
 # failed assertion about the house. Touching the world is the probe: it throws
 # until the table exists, which is exactly the condition being waited on.
 node_ready() {
-    "$REL/bin/merlin" rpc '_ = Merlin.World.dump([]); IO.puts("up")' \
+    "$REL/bin/merlind" rpc '_ = Merlin.World.dump([]); IO.puts("up")' \
         2>>"$REAPER_OUT/smoke-rpc.err" | tail -1
 }
 
@@ -164,7 +164,7 @@ await_node || die "the node never came up"
 say "node up"
 
 # It must actually still be settling, or the assertion below proves nothing.
-settling=$("$REL/bin/merlin" rpc \
+settling=$("$REL/bin/merlind" rpc \
     'IO.puts(to_string(Merlin.Settle.settling?()))' 2>>"$REAPER_OUT/smoke-rpc.err" | tail -1)
 [ "$settling" = "true" ] || die "the settle window had already closed -- the next check is vacuous"
 say "settle window is open"
@@ -222,19 +222,19 @@ if [ "$got" != "pong" ]; then
     find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec tail -40 {} \; 2>/dev/null || true
 
     say "--- is the node even up? ---"
-    "$REL/bin/merlin" pid 2>&1 || true
+    "$REL/bin/merlind" pid 2>&1 || true
 
     # Boot the application in a fresh VM in the FOREGROUND. If start-up halts
     # (bad config, missing priv, crashing child) this is where the reason is
     # printed -- rpc cannot tell us, because rpc needs a node that started.
     say "--- foreground boot attempt (5s) ---"
-    ( "$REL/bin/merlin" eval 'case Merlin.Config.load() do
+    ( "$REL/bin/merlind" eval 'case Merlin.Config.load() do
           :ok -> IO.puts("config OK: " <> inspect(Map.keys(Merlin.Config.loaded())))
           {:error, errs} -> IO.puts("config FAILED:\n" <> Merlin.Config.File.format_errors(errs))
         end' ) 2>&1 | head -30 || true
 
     say "--- config path the release would use ---"
-    "$REL/bin/merlin" eval 'IO.puts(Merlin.Config.path())' 2>&1 | head -3 || true
+    "$REL/bin/merlind" eval 'IO.puts(Merlin.Config.path())' 2>&1 | head -3 || true
 
     die "ping did not produce a pong"
 fi
@@ -257,7 +257,7 @@ rpc_err="$REAPER_OUT/smoke-rpc.err"
 
 i=0
 while [ "$i" -lt 20 ]; do
-    seen=$("$REL/bin/merlin" rpc \
+    seen=$("$REL/bin/merlind" rpc \
         'IO.puts(Merlin.World.get([:system, :last_message]) || "")' 2>>"$rpc_err" | tail -1)
     [ "$seen" = "$marker" ] && break
     i=$((i + 1))
@@ -274,7 +274,7 @@ say "state/update -> fact ok"
 # And the claim that matters most about the subscription model: we asked the
 # broker for the adapters' declared topics, not for everything.
 say "checking we did not subscribe to '#'"
-subs=$("$REL/bin/merlin" rpc \
+subs=$("$REL/bin/merlind" rpc \
     'Merlin.MQTT.Connection.subscriptions() |> Enum.map(&elem(&1, 0)) |> Enum.join(",") |> IO.puts()' \
     2>>"$rpc_err" | tail -1)
 say "subscribed to: $subs"
@@ -298,12 +298,12 @@ esac
 # ---------------------------------------------------------------------------
 say "checking button -> lamps"
 
-lamp_set='zigbee2mqtt/living_room_lamps/set'
+lamp_set='z2m/living_room_lamps/set'
 press() {
     /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r \
-        -t 'zigbee2mqtt/home/living_room/plug/lamp_1' -m "{\"state\":\"$1\"}" 2>/dev/null
+        -t 'z2m/home/living_room/plug/lamp_1' -m "{\"state\":\"$1\"}" 2>/dev/null
     /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r \
-        -t 'zigbee2mqtt/home/living_room/plug/lamp_2' -m "{\"state\":\"$2\"}" 2>/dev/null
+        -t 'z2m/home/living_room/plug/lamp_2' -m "{\"state\":\"$2\"}" 2>/dev/null
     sleep 0.4
 
     out="$REAPER_OUT/smoke-lamps-$3.txt"
@@ -312,7 +312,7 @@ press() {
     lamp_sub=$!
     sleep 0.3
     /usr/local/bin/mosquitto_pub -h 127.0.0.1 \
-        -t 'zigbee2mqtt/home/living_room/switch/lamps/action' -m "$3" 2>/dev/null
+        -t 'z2m/home/living_room/switch/lamps/action' -m "$3" 2>/dev/null
     wait "$lamp_sub" 2>/dev/null || true
     cat "$out" 2>/dev/null
 }
@@ -343,7 +343,7 @@ esac
 # Clear the retained lamp states so the next run starts clean.
 for t in lamp_1 lamp_2; do
     /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r -n \
-        -t "zigbee2mqtt/home/living_room/plug/$t" 2>/dev/null || true
+        -t "z2m/home/living_room/plug/$t" 2>/dev/null || true
 done
 
 # ---------------------------------------------------------------------------
@@ -381,7 +381,7 @@ say "list shows the key without revealing it"
 say "posting to /snitch with the key just minted"
 snitch_out="$REAPER_OUT/smoke-snitch.txt"
 
-# The client is `bin/merlin eval` using OTP's own :httpc. Not fetch(1), which
+# The client is `bin/merlind eval` using OTP's own :httpc. Not fetch(1), which
 # is a download tool and silently discards a request body; not curl or python,
 # neither of which is reliably on this template -- the guest description lists
 # python312 but it is not at /usr/local/bin/python3 here, and guessing at the
@@ -393,7 +393,7 @@ snitch_out="$REAPER_OUT/smoke-snitch.txt"
 # Key and port travel in the environment rather than being interpolated into
 # the expression: same reasoning as the merlin-key overlay.
 MERLIN_SMOKE_KEY="$API_KEY" MERLIN_SMOKE_PORT="$MERLIN_PUBLIC_PORT" \
-"$REL/bin/merlin" eval '
+"$REL/bin/merlind" eval '
   :inets.start()
   key = System.get_env("MERLIN_SMOKE_KEY")
   port = System.get_env("MERLIN_SMOKE_PORT")
@@ -416,7 +416,7 @@ say "snitch response: $(cat "$snitch_out")"
 
 i=0
 while [ "$i" -lt 20 ]; do
-    lat=$("$REL/bin/merlin" rpc \
+    lat=$("$REL/bin/merlind" rpc \
         'IO.puts(inspect(Merlin.World.get([:person, :owner, :lat])))' 2>>"$rpc_err" | tail -1)
     [ "$lat" != "nil" ] && break
     i=$((i + 1))
@@ -441,7 +441,7 @@ esac
 post_position() {
     MERLIN_SMOKE_KEY="$API_KEY" MERLIN_SMOKE_PORT="$MERLIN_PUBLIC_PORT" \
     MERLIN_SMOKE_LAT="$1" MERLIN_SMOKE_LON="$2" MERLIN_SMOKE_ACC="${3:-8}" \
-    "$REL/bin/merlin" eval '
+    "$REL/bin/merlind" eval '
       :inets.start()
       body = Jason.encode!(%{
         challenge: System.get_env("MERLIN_SMOKE_KEY"),
@@ -457,7 +457,7 @@ post_position() {
 }
 
 zone_now() {
-    "$REL/bin/merlin" rpc \
+    "$REL/bin/merlind" rpc \
         'IO.puts(inspect(Merlin.World.get([:person, :owner, :zone])))' 2>>"$rpc_err" | tail -1
 }
 
@@ -525,7 +525,7 @@ poll_log=$(find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec cat {} + 2>/dev/nul
 #
 # The list is derived from the config, not hardcoded, so removing or adding a
 # poller cannot silently narrow what this asserts.
-pollers=$("$REL/bin/merlin" rpc '
+pollers=$("$REL/bin/merlind" rpc '
   Merlin.Config.loaded()
   |> Map.get(:derived, [])
   |> Enum.filter(&(Map.get(&1, :kind) == :http_poll))
@@ -563,7 +563,7 @@ fi
 # `rpc` runs INSIDE the live node, so it fails outright if the application is
 # gone -- which `eval` would not, since eval boots its own beam and would
 # happily report a healthy-looking empty world over a corpse.
-alive=$("$REL/bin/merlin" rpc \
+alive=$("$REL/bin/merlind" rpc \
     'IO.puts(if Process.whereis(Merlin.Supervisor), do: "alive", else: "no-supervisor")' \
     2>>"$REAPER_OUT/smoke-rpc.err" | tail -1)
 
@@ -609,12 +609,12 @@ plug_log="$REAPER_OUT/smoke-plugs.txt"
 
 # Tell the daemon the A/C is on, so there is a desire worth restoring.
 /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r \
-    -t 'home/office/plug/climate' -m '{"state":"ON"}' 2>/dev/null
+    -t 'z2m/home/office/plug/climate' -m '{"state":"ON"}' 2>/dev/null
 sleep 0.5
 
 # Watch both plug set-topics with timestamps, for the whole cycle.
 /usr/local/bin/mosquitto_sub -h 127.0.0.1 -v -W 14 \
-    -t 'home/office/plug/+/set' > "$plug_log" 2>/dev/null &
+    -t 'z2m/home/office/plug/+/set' > "$plug_log" 2>/dev/null &
 plug_sub=$!
 sleep 0.3
 
@@ -629,7 +629,7 @@ sleep 0.3
 # deleted it from the shipped config survived the whole battery.
 ( sleep 2
   /usr/local/bin/mosquitto_pub -h 127.0.0.1 -r \
-      -t 'home/office/plug/climate' -m '{"state":"OFF"}' 2>/dev/null ) &
+      -t 'z2m/home/office/plug/climate' -m '{"state":"OFF"}' 2>/dev/null ) &
 
 wait "$plug_sub" 2>/dev/null || true
 
@@ -673,18 +673,18 @@ say "A/C restored only AFTER the printer returned (bug 7 is fixed)"
 # ---------------------------------------------------------------------------
 say "checking dry_run blocks effects"
 
-"$REL/bin/merlin" stop >/dev/null 2>&1 || true
+"$REL/bin/merlind" stop >/dev/null 2>&1 || true
 sleep 1
 
 MERLIN_DRY_RUN=true
 export MERLIN_DRY_RUN
 export MERLIN_CLIENT_ID="merlin-smoke-dry-$$"
-"$REL/bin/merlin" daemon || die "release failed to restart in dry-run mode"
+"$REL/bin/merlind" daemon || die "release failed to restart in dry-run mode"
 
 # Wait until it is actually connected, or the absence of a pong proves nothing.
 i=0
 while [ "$i" -lt 40 ]; do
-    up=$("$REL/bin/merlin" rpc 'IO.puts(to_string(Merlin.MQTT.Connection.connected?()))' 2>>"$rpc_err" | tail -1)
+    up=$("$REL/bin/merlind" rpc 'IO.puts(to_string(Merlin.MQTT.Connection.connected?()))' 2>>"$rpc_err" | tail -1)
     [ "$up" = "true" ] && break
     i=$((i + 1))
     sleep 0.25
@@ -732,7 +732,7 @@ post_position 51.5537 -0.0708
 await_zone ":workshop" || die "expected zone :workshop, got $(zone_now)"
 
 latch_now() {
-    "$REL/bin/merlin" rpc \
+    "$REL/bin/merlind" rpc \
         'IO.puts(inspect(Merlin.World.get([:rule, :intruder_latch, :state])))' \
         2>>"$REAPER_OUT/smoke-rpc.err" | tail -1
 }
@@ -741,7 +741,7 @@ latch_now() {
 
 say "opening a door while away"
 /usr/local/bin/mosquitto_pub -h 127.0.0.1 \
-    -t 'home/garage/sensor/contact' -m '{"state":"ON"}' 2>/dev/null
+    -t 'z2m/home/garage/sensor/contact' -m '{"state":"ON"}' 2>/dev/null
 
 i=0
 while [ "$i" -lt 20 ]; do
@@ -753,14 +753,14 @@ done
 say "latch fired"
 
 say "stopping the daemon"
-"$REL/bin/merlin" stop >/dev/null 2>&1 || die "graceful stop failed"
+"$REL/bin/merlind" stop >/dev/null 2>&1 || die "graceful stop failed"
 
 snap="$MERLIN_STATE_DIR/facts.snap"
 [ -s "$snap" ] || die "no snapshot at $snap after a graceful stop -- terminate/2 did not run"
 say "snapshot written: $(wc -c < "$snap") bytes"
 
 say "starting it again"
-"$REL/bin/merlin" daemon || die "release failed to restart"
+"$REL/bin/merlind" daemon || die "release failed to restart"
 
 await_node || die "the node never came back up"
 

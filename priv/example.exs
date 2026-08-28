@@ -85,8 +85,29 @@
         [:lamp, :living_room, :one, :power],
         [:lamp, :living_room, :two, :power]
       ],
-      set_topic: "zigbee2mqtt/living_room_lamps/set",
+      set_topic: "z2m/living_room_lamps/set",
       encode: {:json_state, %{on: "ON", off: "OFF"}}
+    },
+
+    # A group with members and no set_topic: a named SET of facts, not a
+    # command target. Nothing is ever published to "the exterior doors".
+    #
+    # This is what makes "only exterior doors alarm" data. The doors all
+    # arrive from one wildcard source and have identically shaped paths, so
+    # `{:changes_under, [:door]}` cannot tell a balcony door from a bedroom
+    # door -- the distinction is about the house, not about the path, and it
+    # belongs here rather than in a prefix.
+    #
+    # Adding a door to the house means adding a line here, and the rule that
+    # watches it follows automatically: the group's members are the rule's
+    # subscription.
+    %{
+      id: :exterior_doors,
+      members: [
+        [:door, "garage", :contact],
+        [:door, "front", :contact],
+        [:door, "back", :contact]
+      ]
     }
   ],
 
@@ -111,7 +132,7 @@
     # are facts: absent until observed, and absent is not "off".
     %{
       id: :lamp_one,
-      topic: "zigbee2mqtt/home/living_room/plug/lamp_1",
+      topic: "z2m/home/living_room/plug/lamp_1",
       decode: :json,
       facts: [
         %{
@@ -123,7 +144,7 @@
     },
     %{
       id: :lamp_two,
-      topic: "zigbee2mqtt/home/living_room/plug/lamp_2",
+      topic: "z2m/home/living_room/plug/lamp_2",
       decode: :json,
       facts: [
         %{
@@ -139,7 +160,7 @@
     # defeat its own value-equality dedup; that hack has nowhere to live now.
     %{
       id: :living_room_button,
-      topic: "zigbee2mqtt/home/living_room/switch/lamps/action",
+      topic: "z2m/home/living_room/switch/lamps/action",
       decode: :raw,
       events: [
         %{
@@ -191,7 +212,7 @@
     # --- office A/C (office_aircond.py) ------------------------------------
     %{
       id: :office_ac,
-      topic: "home/office/plug/climate",
+      topic: "z2m/home/office/plug/climate",
       decode: :json,
       facts: [
         %{
@@ -219,7 +240,11 @@
         %{path: [:person, :owner, :lat], from: [["gps_latitude"]]},
         %{path: [:person, :owner, :lon], from: [["gps_longitude"]]},
         %{path: [:person, :owner, :accuracy_m], from: [["gps_accuracy"]]},
-        %{path: [:person, :owner, :battery_pct], from: [["battery_level"]]}
+        # `batt_level`, which is what the device sends. `battery_level` was a
+        # transcription and never matched anything.
+        %{path: [:person, :owner, :battery_pct], from: [["batt_level"]]},
+        %{path: [:person, :owner, :altitude_m], from: [["gps_altitude"]]},
+        %{path: [:person, :owner, :speed], from: [["gps_speed"]]}
       ]
     },
 
@@ -232,7 +257,7 @@
     # means CLOSED (zigbee2mqtt's convention), else `state == "ON"` means OPEN.
     %{
       id: :doors,
-      topic: "home/+room/sensor/contact",
+      topic: "z2m/home/+room/sensor/contact",
       decode: :json,
       facts: [
         %{
@@ -324,6 +349,20 @@
       lon: [:person, :owner, :lon],
       accuracy: [:person, :owner, :accuracy_m],
       max_accuracy_m: 100,
+      # How fast this person could plausibly travel. Used to decide how long a
+      # fix remains an ANSWER: once somewhere else has been reachable for
+      # longer than the fix is old, the zone becomes :unknown rather than
+      # standing indefinitely.
+      #
+      # A flat stale_after cannot express this. Thirty minutes is neither
+      # generous nor safe and says nothing about geography; "could he be home
+      # by now" is the question the rules actually ask, and distance divided
+      # by speed answers it.
+      #
+      # Generous on purpose: this is a bound on the possible, not a typical
+      # journey. Being too fast only shortens how long merlin will claim to
+      # know where someone is, which is the safe direction.
+      max_speed: {120, :kph},
       out: [:person, :owner, :zone],
       out_position: [:person, :owner, :position],
       # A phone silent for half an hour is not evidence of being anywhere.
@@ -337,6 +376,8 @@
       lon: [:vehicle, :car, :lon],
       accuracy: [:vehicle, :car, :accuracy_m],
       max_accuracy_m: 100,
+      # Faster than the phone: a car on a motorway.
+      max_speed: {160, :kph},
       out: [:vehicle, :car, :zone],
       out_position: [:vehicle, :car, :position],
       stale_after_ms: 1_200_000
@@ -510,18 +551,18 @@
             %{
               on: {:receives, [:printer, :kobra_neo, :power_request]},
               when: "trigger.value == :on",
-              do: [{:publish, "home/office/plug/3d_printer/set", ~s({"state":"ON"})}]
+              do: [{:publish, "z2m/home/office/plug/3d_printer/set", ~s({"state":"ON"})}]
             },
             %{
               on: {:receives, [:printer, :kobra_neo, :power_request]},
               when: "trigger.value == :off",
-              do: [{:publish, "home/office/plug/3d_printer/set", ~s({"state":"OFF"})}]
+              do: [{:publish, "z2m/home/office/plug/3d_printer/set", ~s({"state":"OFF"})}]
             },
             %{
               on: {:receives, [:printer, :kobra_neo, :power_request]},
               when: "trigger.value == :reboot",
               do: [
-                {:publish, "home/office/plug/3d_printer/set", ~s({"state":"OFF"})},
+                {:publish, "z2m/home/office/plug/3d_printer/set", ~s({"state":"OFF"})},
                 {:log, :info, "printer reboot: power cut, 10s dwell"}
               ],
               goto: :dwell
@@ -530,7 +571,7 @@
           dwell: [
             %{
               on: {:after, {10, :second}},
-              do: [{:publish, "home/office/plug/3d_printer/set", ~s({"state":"ON"})}],
+              do: [{:publish, "z2m/home/office/plug/3d_printer/set", ~s({"state":"ON"})}],
               goto: :idle
             },
             # A request arriving mid-cycle is deferred, not dropped. One
@@ -575,7 +616,7 @@
               on: {:enters, [:printer, :kobra_neo, :busy?], true},
               set: %{desired: {:expr, "climate.office.power"}},
               do: [
-                {:publish, "home/office/plug/climate/set", ~s({"state":"OFF"})},
+                {:publish, "z2m/home/office/plug/climate/set", ~s({"state":"OFF"})},
                 {:log, :info, "shedding office A/C for the printer"}
               ],
               goto: :shedding
@@ -618,7 +659,7 @@
               on: {:leaves, [:printer, :kobra_neo, :busy?], true},
               when: "local.desired == :on",
               do: [
-                {:publish, "home/office/plug/climate/set", ~s({"state":"ON"})},
+                {:publish, "z2m/home/office/plug/climate/set", ~s({"state":"ON"})},
                 {:log, :info, "printer finished; restoring office A/C"}
               ],
               goto: :idle
@@ -664,7 +705,11 @@
         states: %{
           armed: [
             %{
-              on: {:changes_under, [:door]},
+              # The exterior doors only, by name. Under `{:changes_under,
+              # [:door]}` this fired on the bedroom door and the office door
+              # -- so walking around the house while the phone had no fix was
+              # indistinguishable from someone coming in through a window.
+              on: {:changes_in, :exterior_doors},
               # Any time we can SEE he is not home -- at the workshop, at the
               # supermarket, anywhere with a usable fix outside the house.
               #
@@ -680,7 +725,16 @@
               when: "defined?(person.owner.zone) and person.owner.zone != :home",
               # Also :log. alerts.py gated this on a flag bug 2 made
               # unreachable, so it has never fired in production either.
-              do: [{:notify, :log, "unexpected activity at home while I am away"}],
+              # Names the door. `trigger.room` is the topic wildcard the fact
+              # was written from, which is the only place the room survives:
+              # it is a path segment, and a value is all a rule could read
+              # until changes carried their captures.
+              do: [
+                {:notify, :log,
+                 {:expr,
+                  "\"unexpected activity at home while I am away: \" + " <>
+                    "to_s(trigger.room, \"an unnamed door\")"}}
+              ],
               goto: :fired
             }
           ],
@@ -702,8 +756,12 @@
     %{
       id: :door_presence,
       desc: "A door changing state is a presence event, naming the room.",
+      # Every door, interior included: this one only observes.
       on: [{:changes_under, [:door]}],
-      do: [{:log, :info, {:expr, "to_s(trigger.value)"}}]
+      do: [
+        {:log, :info,
+         {:expr, "to_s(trigger.room, \"unnamed door\") + \" \" + to_s(trigger.value)"}}
+      ]
     }
   ]
 }

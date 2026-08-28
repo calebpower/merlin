@@ -59,6 +59,7 @@ defmodule Merlin.Rules.Engine do
     for rule <- enabled do
       Enum.each(rule.watches, &Bus.subscribe/1)
       Enum.each(rule.watch_events, &Bus.subscribe_events/1)
+      Enum.each(rule.watch_groups, &Groups.subscribe/1)
     end
 
     Logger.info(
@@ -128,10 +129,8 @@ defmodule Merlin.Rules.Engine do
   defp guard_passes?(%Rule{guard: nil}, _env), do: true
   defp guard_passes?(%Rule{guard: guard}, env), do: Expr.truthy?(Expr.eval(guard, env))
 
-  defp trigger_env(%Change{} = c),
-    do: %{value: c.new, prev: c.old, path: c.path, first?: c.first?}
-
-  defp trigger_env(%Event{} = e), do: %{value: e.payload, path: e.path}
+  defp trigger_env(%Change{} = c), do: Change.trigger_env(c)
+  defp trigger_env(%Event{} = e), do: Event.trigger_env(e)
 
   defp read(path) do
     case Merlin.World.fetch(path) do

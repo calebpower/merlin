@@ -42,11 +42,15 @@ config.toml
 /.fetch
 erl_crash.dump
 *.ez
-merlin-*.tar
+merlind-*.tar
+merlind-*.tar.gz
 /.elixir_ls/
 
 # reaper: results are pulled back into out/ and are never committed
 /out/
 
-# secrets: the real config and the secrets file never enter the repo
-/config/merlin.secrets.exs
+# secrets: a real house's config and secrets never enter this repository.
+# `config/` here is Elixir's compile-time configuration, which is committed;
+# the runtime files live at /usr/local/etc/merlin and are named for the house.
+merlin.secrets.exs
+/merlin.exs

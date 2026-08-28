@@ -46,8 +46,20 @@ defmodule Merlin.Derive.Geofence do
     :stale_after_ms,
     :accuracy_path,
     :max_accuracy_m,
+    :max_speed,
+    :certainty_timer,
+    :unknown_recheck_ms,
     recheck_armed?: false
   ]
+
+  # Fifteen seconds, not sixty. This is how long the house does not know where
+  # someone is after their tracker resumes, and a minute of that is long enough
+  # for a rule to make the wrong decision. Four self-sent messages a minute per
+  # geofence costs nothing.
+  #
+  # Overridable per geofence so a test can use milliseconds rather than
+  # spending a quarter of a minute proving a timer works.
+  @unknown_recheck_ms 15_000
 
   @doc false
   def start_link(spec), do: GenServer.start_link(__MODULE__, spec, name: via(spec.id))
@@ -64,7 +76,9 @@ defmodule Merlin.Derive.Geofence do
       out_position_path: spec[:out_position],
       stale_after_ms: spec[:stale_after_ms],
       accuracy_path: spec[:accuracy],
-      max_accuracy_m: spec[:max_accuracy_m]
+      max_accuracy_m: spec[:max_accuracy_m],
+      max_speed: spec[:max_speed],
+      unknown_recheck_ms: spec[:unknown_recheck_ms] || @unknown_recheck_ms
     }
 
     Merlin.Bus.subscribe(state.lat_path)
@@ -98,6 +112,11 @@ defmodule Merlin.Derive.Geofence do
     {:noreply, recompute(%{state | recheck_armed?: false}, arm_recheck: false)}
   end
 
+  # The subject could now be somewhere else. See `certainty_window_ms/3`.
+  def handle_info(:certainty_lapsed, state) do
+    {:noreply, recompute(%{state | certainty_timer: nil}, arm_recheck: false)}
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
 
   @doc """
@@ -125,6 +144,90 @@ defmodule Merlin.Derive.Geofence do
   # observation holds once and stops rather than spinning.
   @recheck_ms 50
 
+  # How long a fix keeps being an answer.
+  #
+  # `stale_after` alone is a guess: thirty minutes is neither long enough to be
+  # generous nor short enough to be safe, and it says nothing about geography.
+  # The question a rule actually asks is "could he be somewhere else by now",
+  # and that is answerable -- distance to the nearest other zone, divided by
+  # the fastest he could plausibly travel.
+  #
+  # Straight-line, so it is a genuine lower bound: no route is shorter than the
+  # great circle. If it says the hackspace is eight minutes from home and four
+  # have passed, he certainly has not arrived, whatever road he took.
+  #
+  # This is not hypothetical. A phone went flat at the hackspace at 23:23; the
+  # car came home at 00:24; a door opened at 00:27; and the intruder latch
+  # fired, because the zone still said `:hackspace` an hour after anyone could
+  # possibly know that. Without a declared `max_speed` the behaviour is
+  # unchanged, so this costs nothing to leave out.
+  defp certainty_window_ms(_point, _zone, %{max_speed: nil}), do: :infinity
+
+  defp certainty_window_ms(point, zone, state) do
+    mps = Merlin.Geo.to_mps(state.max_speed)
+
+    others =
+      Zones.all()
+      |> Enum.reject(fn {id, _z} -> id == zone end)
+
+    cond do
+      mps <= 0 ->
+        :infinity
+
+      others == [] ->
+        # Nowhere else to be, so the answer cannot become wrong this way.
+        :infinity
+
+      true ->
+        others
+        |> Enum.map(fn {_id, z} ->
+          # To the EDGE of the other zone, not its centre: arriving means
+          # getting inside it.
+          metres = max(Merlin.Geo.distance(point, z.center) - z.radius_m, 0.0)
+          round(metres / mps * 1_000)
+        end)
+        |> Enum.min()
+    end
+  end
+
+  # While the answer is :unknown, re-read on a timer.
+  #
+  # `World.put/3` notifies on CHANGE, and a parked car reports the same
+  # coordinates every two minutes -- so fresh, perfectly good fixes arrive
+  # that publish nothing. Once the certainty window had expired the zone
+  # therefore stayed :unknown for ever, and a car sitting in the drive being
+  # tracked correctly read as unlocatable for four hours.
+  #
+  # The same trap as the accuracy fact in M7, reached from the other side: any
+  # design that only reacts to changes is blind to a value that is refreshed
+  # without changing. So whenever the published answer is :unknown, look again
+  # shortly -- a fix whose observed_at has advanced restores the zone even
+  # though its value never moved.
+  defp schedule_unknown_recheck(state) do
+    state = cancel_certainty(state)
+    ref = Process.send_after(self(), :certainty_lapsed, state.unknown_recheck_ms)
+    %{state | certainty_timer: ref}
+  end
+
+  @doc "The default interval for re-reading while the subject cannot be placed."
+  @spec unknown_recheck_ms() :: pos_integer()
+  def unknown_recheck_ms, do: @unknown_recheck_ms
+
+  # Only ever called with a finite remaining window: the :infinity case is
+  # decided before this, in recompute.
+  defp schedule_certainty(state, window_ms) when is_integer(window_ms) do
+    state = cancel_certainty(state)
+    ref = Process.send_after(self(), :certainty_lapsed, max(window_ms, 50))
+    %{state | certainty_timer: ref}
+  end
+
+  defp cancel_certainty(%{certainty_timer: nil} = state), do: state
+
+  defp cancel_certainty(%{certainty_timer: ref} = state) do
+    Process.cancel_timer(ref)
+    %{state | certainty_timer: nil}
+  end
+
   defp recompute(state, opts \\ []) do
     previous = World.get(state.out_path, :unknown)
 
@@ -146,14 +249,60 @@ defmodule Merlin.Derive.Geofence do
           state
         end
 
-      point ->
-        do_recompute(state, previous, point)
-        state
+      :unknown ->
+        # No usable fix at all -- absent, stale or too vague. Distinct from
+        # `:incoherent`, which holds; this one publishes, because "we cannot
+        # place him" is an answer and rules decline on it.
+        if previous != :unknown do
+          Logger.info("#{state.id}: #{inspect(previous)} -> :unknown")
+        end
+
+        World.put(state.out_path, :unknown, source: {:derive, state.id})
+
+        if state.out_position_path do
+          World.put(state.out_position_path, :unknown, source: {:derive, state.id})
+        end
+
+        # Keep looking. A poller that resumes reporting the same coordinates
+        # refreshes observed_at without publishing anything, so waiting for a
+        # change would wait for ever.
+        schedule_unknown_recheck(state)
+
+      {point, fix_at} ->
+        do_recompute(state, previous, point, fix_at)
     end
   end
 
-  defp do_recompute(state, previous, point) do
-    zone = Zones.resolve(point, previous, Zones.all())
+  defp do_recompute(state, previous, point, fix_at) do
+    resolved = Zones.resolve(point, previous, Zones.all())
+    window = certainty_window_ms(point, resolved, state)
+    age = System.monotonic_time(:millisecond) - fix_at
+
+    {zone, state} =
+      cond do
+        window == :infinity and resolved == :unknown ->
+          {resolved, schedule_unknown_recheck(state)}
+
+        window == :infinity ->
+          {resolved, cancel_certainty(state)}
+
+        age >= window ->
+          # He could be somewhere else by now, so this fix is no longer an
+          # answer. :unknown rather than the last zone: rules act on a zone
+          # and decline on :unknown, which is the whole point.
+          if resolved != :unknown do
+            Logger.info(
+              "#{state.id}: #{inspect(resolved)} is no longer certain -- the fix is " <>
+                "#{div(age, 1000)}s old and somewhere else has been reachable for " <>
+                "#{div(age - window, 1000)}s"
+            )
+          end
+
+          {:unknown, schedule_unknown_recheck(state)}
+
+        true ->
+          {resolved, schedule_certainty(state, window - age)}
+      end
 
     if zone != previous do
       Logger.info("#{state.id}: #{inspect(previous)} -> #{inspect(zone)}")
@@ -167,6 +316,8 @@ defmodule Merlin.Derive.Geofence do
     if state.out_position_path do
       World.put(state.out_position_path, point, source: {:derive, state.id})
     end
+
+    state
   end
 
   # How far apart two components of one observation may be observed and still
@@ -217,7 +368,9 @@ defmodule Merlin.Derive.Geofence do
          {:ok, lon, lon_at} <- fresh_value(state.lon_path, state.stale_after_ms),
          :ok <- coherent?([lat_at, lon_at | accuracy_observed_at(state)]),
          :ok <- accurate_enough(state) do
-      {lat, lon}
+      # The older of the two components is when this fix was taken, and it is
+      # what the certainty window is measured from.
+      {{lat, lon}, min(lat_at, lon_at)}
     else
       :incoherent -> :incoherent
       _ -> :unknown

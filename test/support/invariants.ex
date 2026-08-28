@@ -16,7 +16,7 @@ defmodule Merlin.Test.Invariants do
       %{
         seq: 12,
         kind: :publish | :step,
-        topic: "home/office/plug/climate/set",   # :publish only
+        topic: "z2m/home/office/plug/climate/set",   # :publish only
         payload: ~s({"state":"ON"}),             # :publish only
         note: "door garage -> open",             # :step only
         settling?: false,
@@ -47,6 +47,7 @@ defmodule Merlin.Test.Invariants do
       {:ac_off_for_the_whole_cycle, &ac_off_for_the_whole_cycle/1},
       {:latch_never_fires_at_home, &latch_never_fires_at_home/1},
       {:latch_never_fires_on_a_lost_phone, &latch_never_fires_on_a_lost_phone/1},
+      {:latch_only_fires_on_an_exterior_door, &latch_only_fires_on_an_exterior_door/1},
       {:nothing_published_while_settling, &nothing_published_while_settling/1},
       {:latch_stays_fired_until_home, &latch_stays_fired_until_home/1},
       {:lamps_never_commanded_in_daylight, &lamps_never_commanded_in_daylight/1},
@@ -79,13 +80,13 @@ defmodule Merlin.Test.Invariants do
     |> Enum.filter(&(&1.kind == :publish))
     |> Enum.reduce({nil, []}, fn e, {printer_down_at, violations} ->
       cond do
-        e.topic == "home/office/plug/3d_printer/set" and state_of(e.payload) == :off ->
+        e.topic == "z2m/home/office/plug/3d_printer/set" and state_of(e.payload) == :off ->
           {e.seq, violations}
 
-        e.topic == "home/office/plug/3d_printer/set" and state_of(e.payload) == :on ->
+        e.topic == "z2m/home/office/plug/3d_printer/set" and state_of(e.payload) == :on ->
           {nil, violations}
 
-        printer_down_at != nil and e.topic == "home/office/plug/climate/set" and
+        printer_down_at != nil and e.topic == "z2m/home/office/plug/climate/set" and
             state_of(e.payload) == :on ->
           {printer_down_at,
            [
@@ -154,6 +155,78 @@ defmodule Merlin.Test.Invariants do
       end
     end)
   end
+
+  @doc """
+  The latch fires only for a door the house calls exterior.
+
+  Every door in this house arrives from one wildcard source and lands at a path
+  of exactly the same shape, so `{:changes_under, [:door]}` selects all of them
+  -- the bedroom and the office included. Which doors are worth alarming about
+  is a fact about the building, not about the path, and it lives in the
+  `:exterior_doors` group.
+
+  Asserted against that group rather than a list written here, so adding an
+  interior door to the house cannot quietly fall outside what this checks.
+
+  The failure it exists to catch is not theoretical: the latch shipped through
+  M7 on the bare prefix, so walking from the bedroom to the kitchen while the
+  phone had no fix looked exactly like someone coming in through a window.
+  """
+  @spec latch_only_fires_on_an_exterior_door(timeline()) :: [binary()]
+  def latch_only_fires_on_an_exterior_door(timeline),
+    do: latch_only_fires_on_an_exterior_door(timeline, Merlin.Groups.members(:exterior_doors))
+
+  @doc """
+  As above, against an explicit member list.
+
+  The self-test needs to drive this without installing a whole house, and an
+  invariant whose reference data is only reachable through global state is one
+  that cannot be shown to fire.
+  """
+  @spec latch_only_fires_on_an_exterior_door(timeline(), [Merlin.Path.t()]) :: [binary()]
+  def latch_only_fires_on_an_exterior_door(timeline, members) do
+    exterior = MapSet.new(members)
+
+    timeline
+    |> transitions([:rule, :intruder_latch, :state])
+    |> Enum.flat_map(fn {entry, from, to} ->
+      with true <- from != :fired and to == :fired,
+           {:ok, room} <- door_room(entry) do
+        cond do
+          # No members means the group is gone or the config never loaded.
+          # Reporting that is the point: an invariant that silently checks
+          # nothing against an empty set is the failure this whole tier is
+          # built to avoid.
+          Enum.empty?(exterior) ->
+            ["no :exterior_doors members to check the fire at seq #{entry.seq} against"]
+
+          MapSet.member?(exterior, [:door, room, :contact]) ->
+            []
+
+          true ->
+            ["the latch fired at seq #{entry.seq} on #{room}, which is not an exterior door"]
+        end
+      else
+        # A transition to :fired with no door in the note is a different
+        # defect, and latch_never_fires_at_home/1 owns it. Saying nothing here
+        # is deliberate: an invariant that reports on what it does not check is
+        # an invariant nobody trusts.
+        _ -> []
+      end
+    end)
+  end
+
+  # Steps are recorded as "<topic> <payload>", so the room is the wildcard
+  # segment of the door filter. Matching the shape rather than a list of names
+  # keeps this working when the house gains a door.
+  defp door_room(%{note: note}) when is_binary(note) do
+    case Regex.run(~r{^z2m/home/([^/]+)/sensor/contact\s}, note) do
+      [_, room] -> {:ok, room}
+      nil -> :error
+    end
+  end
+
+  defp door_room(_entry), do: :error
 
   @doc """
   A latch that un-latches on its own is not a latch.
