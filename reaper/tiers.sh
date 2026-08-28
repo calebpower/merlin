@@ -41,11 +41,19 @@ tier() {
     "$@" > "$REAPER_OUT/tier-$n.log" 2>&1 &
     cmd_pid=$!
 
+    # Elapsed counted here, not read from $SECONDS: that is a bash variable and
+    # this runs under /bin/sh, where `set -u` made every heartbeat print
+    # "SECONDS: parameter not set" instead of a time. The heartbeat still fired,
+    # so the run never wedged -- it just stopped saying anything useful, which
+    # is the failure mode a heartbeat exists to prevent.
+    elapsed=0
+
     (
         while kill -0 "$cmd_pid" 2>/dev/null; do
             sleep 30
+            elapsed=$((elapsed + 30))
             kill -0 "$cmd_pid" 2>/dev/null && \
-                printf '    tier %s still running (%ss)\n' "$n" "$SECONDS"
+                printf '    tier %s still running (%ss)\n' "$n" "$elapsed"
         done
     ) &
     hb_pid=$!
