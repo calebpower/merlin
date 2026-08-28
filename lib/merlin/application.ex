@@ -62,7 +62,12 @@ defmodule Merlin.Application do
           # else. Losing tokens when something upstream restarts is correct: a
           # command prepared against the old world should not survive into the
           # new one.
-          Merlin.Control
+          Merlin.Control,
+
+          # One tap per attached session, started on demand by Merlin.Tap.attach/2
+          # over distribution. Temporary children: a tap exists only for its
+          # client, and outlives it by no more than a monitor message.
+          {DynamicSupervisor, strategy: :one_for_one, name: Merlin.Tap.Supervisor}
         ]
 
     opts = [
