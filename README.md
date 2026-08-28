@@ -309,9 +309,14 @@ Licensed under the Apache License, Version 2.0. You may not use this work
 except in compliance with the License; a copy is in `LICENSE`, and the
 canonical text is at <https://www.apache.org/licenses/LICENSE-2.0>.
 
-Every dependency is permissive and none imposes a copyleft term: `plug`,
-`req`, `jason`, `tortoise311`, `nimble_options`, `mox`, `stream_data` and
-`dialyxir` are Apache-2.0; `bandit` and `exqlite` are MIT.
+Every dependency is permissive and none imposes a copyleft term. That is the
+whole locked tree — 25 packages, ten direct and fifteen transitive — not just
+the ones named in `mix.exs`: twenty are Apache-2.0, and `bandit`, `exqlite`,
+`finch`, `thousand_island` and `websock` are MIT.
+
+The audit is meaningful only because `mix.lock` is committed. Without a lock
+the tree resolves afresh on every build, and a statement about its licences
+would be a statement about whatever happened to install that day.
 
 There are no per-file licence headers. Apache-2.0 recommends them and does not
 require them, and in this codebase the top of every module is a `@moduledoc`
