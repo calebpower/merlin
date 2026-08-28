@@ -14,6 +14,17 @@ defmodule Merlin.Rule do
         do: [{:set_group, :living_room_lamps, :off}]
       }
 
+  ## `{:changes_in, group}`
+
+  A trigger that fires for any *member* of a named group, so which doors alarm
+  is a list in the house's config rather than a prefix in the platform's rule
+  vocabulary. `{:changes_under, [:door]}` cannot express "the exterior ones":
+  the only thing it can select on is the shape of the path, and interior and
+  exterior doors have the same shape.
+
+  The group's members are its subscription too -- see `watch_groups` -- so
+  adding a door to the group is the whole change.
+
   ## Subscriptions are derived, never written
 
   A rule's watched paths come from its triggers *and* from the fact reads
@@ -23,14 +34,25 @@ defmodule Merlin.Rule do
   expressible.
   """
 
-  alias Merlin.Expr
+  alias Merlin.{Expr, Groups}
 
   @enforce_keys [:id, :triggers, :actions]
-  defstruct [:id, :desc, :triggers, :guard, :actions, :watches, :watch_events, enabled: true]
+  defstruct [
+    :id,
+    :desc,
+    :triggers,
+    :guard,
+    :actions,
+    :watches,
+    :watch_events,
+    :watch_groups,
+    enabled: true
+  ]
 
   @type trigger ::
           {:changes, Merlin.Path.t()}
           | {:changes_under, Merlin.Path.t()}
+          | {:changes_in, atom()}
           | {:enters, Merlin.Path.t(), term()}
           | {:leaves, Merlin.Path.t(), term()}
           | {:receives, Merlin.Path.t()}
@@ -50,6 +72,7 @@ defmodule Merlin.Rule do
           actions: [action()],
           watches: [Merlin.Path.t()],
           watch_events: [Merlin.Path.t()],
+          watch_groups: [atom()],
           enabled: boolean()
         }
 
@@ -64,7 +87,7 @@ defmodule Merlin.Rule do
     with {:ok, triggers} <- compile_triggers(id, Map.get(data, :on, [])),
          {:ok, guard} <- compile_guard(id, Map.get(data, :when)),
          {:ok, actions} <- compile_actions(id, Map.get(data, :do, [])) do
-      {fact_watches, event_watches} = watches(triggers, guard)
+      {fact_watches, event_watches, group_watches} = watches(triggers, guard)
 
       {:ok,
        %__MODULE__{
@@ -75,6 +98,7 @@ defmodule Merlin.Rule do
          actions: actions,
          watches: fact_watches,
          watch_events: event_watches,
+         watch_groups: group_watches,
          enabled: Map.get(data, :enabled, true)
        }}
     end
@@ -94,6 +118,15 @@ defmodule Merlin.Rule do
 
   def trigger_fires?({:changes_under, prefix}, %Merlin.Change{path: p}),
     do: Merlin.Path.prefix?(prefix, p)
+
+  # Membership, resolved at fire time rather than baked in at compile time.
+  # Groups are not in `Merlin.Config` yet while rules are being compiled --
+  # compilation happens *inside* config validation -- so a compile-time
+  # expansion would either read a stale group or force the validator to hand
+  # rule compilation a second copy of the config to agree with. Reading here
+  # keeps one definition of what the group contains.
+  def trigger_fires?({:changes_in, group}, %Merlin.Change{path: p}),
+    do: p in Groups.members(group)
 
   def trigger_fires?({:enters, path, value}, %Merlin.Change{path: p, new: new, old: old}),
     do: p == path and new == value and old != value
@@ -123,6 +156,7 @@ defmodule Merlin.Rule do
   @spec validate_trigger(term()) :: :ok | {:error, term()}
   def validate_trigger({:changes, path}) when is_list(path), do: :ok
   def validate_trigger({:changes_under, path}) when is_list(path), do: :ok
+  def validate_trigger({:changes_in, group}) when is_atom(group), do: :ok
   def validate_trigger({:enters, path, _}) when is_list(path), do: :ok
   def validate_trigger({:leaves, path, _}) when is_list(path), do: :ok
   def validate_trigger({:receives, path}) when is_list(path), do: :ok
@@ -207,6 +241,7 @@ defmodule Merlin.Rule do
       Enum.flat_map(triggers, fn
         {:changes, path} -> [{:fact, path}]
         {:changes_under, prefix} -> [{:fact, prefix}]
+        {:changes_in, group} -> [{:group, group}]
         {:enters, path, _} -> [{:fact, path}]
         {:leaves, path, _} -> [{:fact, path}]
         {:receives, path} -> [{:event, path}]
@@ -218,7 +253,8 @@ defmodule Merlin.Rule do
 
     {
       for({:fact, p} <- all, do: p),
-      for({:event, p} <- all, do: p)
+      for({:event, p} <- all, do: p),
+      for({:group, g} <- all, do: g)
     }
   end
 end

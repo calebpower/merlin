@@ -87,6 +87,27 @@
       ],
       set_topic: "z2m/living_room_lamps/set",
       encode: {:json_state, %{on: "ON", off: "OFF"}}
+    },
+
+    # A group with members and no set_topic: a named SET of facts, not a
+    # command target. Nothing is ever published to "the exterior doors".
+    #
+    # This is what makes "only exterior doors alarm" data. The doors all
+    # arrive from one wildcard source and have identically shaped paths, so
+    # `{:changes_under, [:door]}` cannot tell a balcony door from a bedroom
+    # door -- the distinction is about the house, not about the path, and it
+    # belongs here rather than in a prefix.
+    #
+    # Adding a door to the house means adding a line here, and the rule that
+    # watches it follows automatically: the group's members are the rule's
+    # subscription.
+    %{
+      id: :exterior_doors,
+      members: [
+        [:door, "garage", :contact],
+        [:door, "front", :contact],
+        [:door, "back", :contact]
+      ]
     }
   ],
 
@@ -684,7 +705,11 @@
         states: %{
           armed: [
             %{
-              on: {:changes_under, [:door]},
+              # The exterior doors only, by name. Under `{:changes_under,
+              # [:door]}` this fired on the bedroom door and the office door
+              # -- so walking around the house while the phone had no fix was
+              # indistinguishable from someone coming in through a window.
+              on: {:changes_in, :exterior_doors},
               # Any time we can SEE he is not home -- at the workshop, at the
               # supermarket, anywhere with a usable fix outside the house.
               #
@@ -700,7 +725,16 @@
               when: "defined?(person.owner.zone) and person.owner.zone != :home",
               # Also :log. alerts.py gated this on a flag bug 2 made
               # unreachable, so it has never fired in production either.
-              do: [{:notify, :log, "unexpected activity at home while I am away"}],
+              # Names the door. `trigger.room` is the topic wildcard the fact
+              # was written from, which is the only place the room survives:
+              # it is a path segment, and a value is all a rule could read
+              # until changes carried their captures.
+              do: [
+                {:notify, :log,
+                 {:expr,
+                  "\"unexpected activity at home while I am away: \" + " <>
+                    "to_s(trigger.room, \"an unnamed door\")"}}
+              ],
               goto: :fired
             }
           ],
@@ -722,8 +756,12 @@
     %{
       id: :door_presence,
       desc: "A door changing state is a presence event, naming the room.",
+      # Every door, interior included: this one only observes.
       on: [{:changes_under, [:door]}],
-      do: [{:log, :info, {:expr, "to_s(trigger.value)"}}]
+      do: [
+        {:log, :info,
+         {:expr, "to_s(trigger.room, \"unnamed door\") + \" \" + to_s(trigger.value)"}}
+      ]
     }
   ]
 }

@@ -53,7 +53,15 @@ defmodule Merlin.HTTP.LocalRouter do
           triggers: inspect(r.triggers),
           guard: r.guard && r.guard.source,
           watches: Enum.map(r.watches, &Path.to_string/1),
-          watch_events: Enum.map(r.watch_events, &Path.to_string/1)
+          watch_events: Enum.map(r.watch_events, &Path.to_string/1),
+          # A rule triggering on a group has no watches of its own. Omitting
+          # this would render it as a rule subscribed to nothing, which is
+          # exactly the diagnosis this endpoint exists to give.
+          watch_groups: r.watch_groups,
+          watch_group_members:
+            Enum.flat_map(r.watch_groups, fn g ->
+              Enum.map(Merlin.Groups.members(g), &Path.to_string/1)
+            end)
         }
       end)
 

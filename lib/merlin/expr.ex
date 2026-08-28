@@ -62,7 +62,7 @@ defmodule Merlin.Expr do
 
   @operators [:==, :!=, :<, :<=, :>, :>=, :and, :or, :not, :in, :+, :-, :*, :/]
 
-  # {name, arity} => implementation. The budget is 25; this is 10.
+  # {name, arity} => implementation. The budget is 25; this is 11.
   @builtins %{
     {:if, 3} => :if_,
     {:defined?, 1} => :defined?,
@@ -73,6 +73,7 @@ defmodule Merlin.Expr do
     {:distance, 2} => :distance,
     {:within?, 3} => :within?,
     {:to_s, 1} => :to_s,
+    {:to_s, 2} => :to_s_or,
     {:abs, 1} => :abs_
   }
 
@@ -421,6 +422,13 @@ defmodule Merlin.Expr do
 
   defp apply_op(:/, [_, 0]), do: :unknown
   defp apply_op(:/, [_, +0.0]), do: :unknown
+
+  # `+` joins two strings as well as two numbers. Composing a message out of a
+  # literal and a value is the one thing every `notify` and `log` that names
+  # anything has to do, and the alternative was a `format` builtin -- more
+  # vocabulary for less. Mixed operands stay :unknown rather than coercing:
+  # `1 + "2"` is a mistake, not an intention.
+  defp apply_op(:+, [a, b]) when is_binary(a) and is_binary(b), do: a <> b
 
   defp apply_op(op, [a, b]) when op in [:+, :-, :*, :/] do
     if is_number(a) and is_number(b), do: arith(op, a, b), else: :unknown
