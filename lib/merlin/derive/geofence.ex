@@ -48,8 +48,18 @@ defmodule Merlin.Derive.Geofence do
     :max_accuracy_m,
     :max_speed,
     :certainty_timer,
+    :unknown_recheck_ms,
     recheck_armed?: false
   ]
+
+  # Fifteen seconds, not sixty. This is how long the house does not know where
+  # someone is after their tracker resumes, and a minute of that is long enough
+  # for a rule to make the wrong decision. Four self-sent messages a minute per
+  # geofence costs nothing.
+  #
+  # Overridable per geofence so a test can use milliseconds rather than
+  # spending a quarter of a minute proving a timer works.
+  @unknown_recheck_ms 15_000
 
   @doc false
   def start_link(spec), do: GenServer.start_link(__MODULE__, spec, name: via(spec.id))
@@ -67,7 +77,8 @@ defmodule Merlin.Derive.Geofence do
       stale_after_ms: spec[:stale_after_ms],
       accuracy_path: spec[:accuracy],
       max_accuracy_m: spec[:max_accuracy_m],
-      max_speed: spec[:max_speed]
+      max_speed: spec[:max_speed],
+      unknown_recheck_ms: spec[:unknown_recheck_ms] || @unknown_recheck_ms
     }
 
     Merlin.Bus.subscribe(state.lat_path)
@@ -179,6 +190,29 @@ defmodule Merlin.Derive.Geofence do
     end
   end
 
+  # While the answer is :unknown, re-read on a timer.
+  #
+  # `World.put/3` notifies on CHANGE, and a parked car reports the same
+  # coordinates every two minutes -- so fresh, perfectly good fixes arrive
+  # that publish nothing. Once the certainty window had expired the zone
+  # therefore stayed :unknown for ever, and a car sitting in the drive being
+  # tracked correctly read as unlocatable for four hours.
+  #
+  # The same trap as the accuracy fact in M7, reached from the other side: any
+  # design that only reacts to changes is blind to a value that is refreshed
+  # without changing. So whenever the published answer is :unknown, look again
+  # shortly -- a fix whose observed_at has advanced restores the zone even
+  # though its value never moved.
+  defp schedule_unknown_recheck(state) do
+    state = cancel_certainty(state)
+    ref = Process.send_after(self(), :certainty_lapsed, state.unknown_recheck_ms)
+    %{state | certainty_timer: ref}
+  end
+
+  @doc "The default interval for re-reading while the subject cannot be placed."
+  @spec unknown_recheck_ms() :: pos_integer()
+  def unknown_recheck_ms, do: @unknown_recheck_ms
+
   # Only ever called with a finite remaining window: the :infinity case is
   # decided before this, in recompute.
   defp schedule_certainty(state, window_ms) when is_integer(window_ms) do
@@ -229,7 +263,10 @@ defmodule Merlin.Derive.Geofence do
           World.put(state.out_position_path, :unknown, source: {:derive, state.id})
         end
 
-        cancel_certainty(state)
+        # Keep looking. A poller that resumes reporting the same coordinates
+        # refreshes observed_at without publishing anything, so waiting for a
+        # change would wait for ever.
+        schedule_unknown_recheck(state)
 
       {point, fix_at} ->
         do_recompute(state, previous, point, fix_at)
@@ -243,6 +280,9 @@ defmodule Merlin.Derive.Geofence do
 
     {zone, state} =
       cond do
+        window == :infinity and resolved == :unknown ->
+          {resolved, schedule_unknown_recheck(state)}
+
         window == :infinity ->
           {resolved, cancel_certainty(state)}
 
@@ -258,7 +298,7 @@ defmodule Merlin.Derive.Geofence do
             )
           end
 
-          {:unknown, cancel_certainty(state)}
+          {:unknown, schedule_unknown_recheck(state)}
 
         true ->
           {resolved, schedule_certainty(state, window - age)}
