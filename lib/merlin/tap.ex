@@ -169,6 +169,43 @@ defmodule Merlin.Tap do
     :exit, _ -> m.initial
   end
 
+  @doc """
+  Why a rule would, or would not, act on a change to `path`.
+
+  Hypothetical, and truthful precisely because it is: the change is invented,
+  so *now* is the only sensible moment to evaluate it against. A retrospective
+  replay would be evaluated against a world that has moved on, and presenting
+  that as a record of what happened is the kind of lie that costs a night --
+  which is why this offers only the honest half.
+
+  Runs on the daemon because it must: `trigger_fires?/2` for a `:changes_in`
+  trigger consults the loaded groups, and a guard needs an environment bound to
+  the live ETS. A client evaluating either would get a confident wrong answer
+  rather than an error.
+  """
+  @spec explain(atom(), Merlin.Path.t()) ::
+          {:ok, Merlin.Rules.Explanation.t()} | {:error, term()}
+  def explain(rule_id, path) when is_atom(rule_id) and is_list(path) do
+    change = %Merlin.Change{
+      path: path,
+      old: Merlin.World.get(path),
+      new: Merlin.World.get(path),
+      at: System.monotonic_time(:millisecond),
+      source: {:operator, "explain"},
+      # 1, not 0. A sequence number is declared pos_integer, and dialyzer said
+      # so -- 0 was me signalling "this change is not real", which the type
+      # does not have a way to mean. The source carries that instead, and this
+      # change never reaches the bus: Explain only reads it.
+      seq: 1,
+      first?: false
+    }
+
+    case Merlin.Rules.Explain.explain(rule_id, change) do
+      {:error, reason} -> {:error, reason}
+      explanation -> {:ok, explanation}
+    end
+  end
+
   @doc "How many items may be pending before the oldest are dropped."
   @spec max_pending() :: pos_integer()
   def max_pending, do: @max_pending

@@ -115,6 +115,15 @@ defmodule Merlin.TUI.Remote do
     :ok
   end
 
+  @doc "Why a rule would or would not act on a change to `path`."
+  @spec explain(node(), atom(), Merlin.Path.t()) :: {:ok, term()} | {:error, term()}
+  def explain(node, rule_id, path) do
+    case call(node, Merlin.Tap, :explain, [rule_id, path]) do
+      {:ok, result} -> result
+      error -> error
+    end
+  end
+
   @doc "Evaluate a merlin expression against the live world, on the daemon."
   @spec evaluate(node(), binary()) :: {:ok, term()} | {:error, term()}
   def evaluate(node, source), do: call(node, Merlin.Tap, :evaluate, [source])
