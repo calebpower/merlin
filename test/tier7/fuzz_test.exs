@@ -259,4 +259,87 @@ defmodule Merlin.FuzzTest do
       end
     end
   end
+
+  # --- the operator's own input seams ---------------------------------------
+  #
+  # Bytes from a terminal are not a trusted stream either -- a paste, a mouse
+  # report, a sequence mangled over a slow link -- and a fact value reaching a
+  # view came from an MQTT payload, which is the same untrusted source the
+  # tests above already point at.
+  #
+  # Written with this file's own seeded PRNG rather than stream_data, so the
+  # tier keeps ONE generator and one replay mechanism. Two would mean two seeds
+  # to quote in a bug report and two things to keep in step.
+
+  describe "the terminal seams" do
+    test "key decoding never crashes, loops, or hoards its carry" do
+      # The carry is the thing to watch: a decoder that keeps what it cannot
+      # yet read must still make progress, or a fuzzed stream grows it without
+      # bound. Nothing legitimately pends beyond three bytes of a part-arrived
+      # character or an unfinished escape sequence.
+      for _ <- 1..300 do
+        bytes = rand_binary(400)
+        {keys, carry} = Merlin.TUI.Keys.decode(bytes)
+
+        assert is_list(keys)
+
+        assert byte_size(carry) < 4 or String.starts_with?(carry, "\e"),
+               "carry grew to #{byte_size(carry)} bytes"
+      end
+    end
+
+    test "the command line never actuates by accident" do
+      # Only three verbs reach the house. Anything else must be a view action,
+      # an expression, or a refusal -- never something that commands a device.
+      for _ <- 1..300 do
+        line = rand_utf8(80)
+
+        case Merlin.TUI.Command.parse(line) do
+          {:control, _} ->
+            assert String.starts_with?(String.trim(line), ["set", "publish", "fact"]),
+                   "#{inspect(line)} became a control command"
+
+          _ ->
+            :ok
+        end
+      end
+    end
+
+    test "a hostile fact value cannot escape the grid" do
+      # The same defect class as the ingest fuzzing above, one layer out: a
+      # tampered device publishing an escape sequence must not be able to
+      # repaint the operator's screen.
+      for _ <- 1..200 do
+        value = if :rand.uniform(2) == 1, do: rand_binary(60), else: rand_utf8(60)
+        w = 20 + :rand.uniform(80)
+        h = 3 + :rand.uniform(10)
+
+        scene = %Merlin.TUI.Scene{
+          facts: [
+            %Merlin.Fact{
+              path: [:fuzz, rand_utf8(20)],
+              value: value,
+              changed_at: 0,
+              observed_at: 0,
+              source: nil,
+              seq: 1,
+              stale_after: nil
+            }
+          ],
+          now: 1_000
+        }
+
+        buffer = Merlin.TUI.View.Facts.render(scene, %{}, {w, h})
+        text = Merlin.TUI.Buffer.to_text(buffer)
+
+        assert buffer.w == w and buffer.h == h
+        refute text =~ "\e"
+
+        for line <- String.split(text, "\n") do
+          assert String.length(line) == w,
+                 "a row was #{String.length(line)} of #{w} columns"
+        end
+      end
+    end
+  end
 end

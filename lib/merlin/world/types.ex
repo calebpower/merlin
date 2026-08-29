@@ -6,6 +6,18 @@ defmodule Merlin.Fact do
   and last *observed*. Writing the same value again is a legal and meaningful
   operation -- it refreshes `observed_at` without notifying anyone.
 
+  ## `observation`
+
+  Which arrival of data this value was read from. One MQTT payload or one HTTP
+  response becomes several fact writes, and all of them carry the same id.
+
+  It exists because "were these two values read from the same observation" is a
+  question timestamps cannot answer. Proximity in time is evidence that two
+  values MIGHT belong together and is never proof that they do -- and a deriver
+  combining components across two different arrivals computes a result
+  describing a world that never existed. `nil` where the writer was not an
+  arrival at all: a rule action, an operator, a restored snapshot.
+
   That distinction is the thing the Python `GlobalState` could not express. Its
   `set/2` did nothing at all when the value was unchanged, so a sensor still
   reporting the same reading every 30 seconds was indistinguishable from a
@@ -14,7 +26,16 @@ defmodule Merlin.Fact do
   """
 
   @enforce_keys [:path, :value, :changed_at, :observed_at, :source, :seq]
-  defstruct [:path, :value, :changed_at, :observed_at, :source, :seq, :stale_after]
+  defstruct [
+    :path,
+    :value,
+    :changed_at,
+    :observed_at,
+    :source,
+    :seq,
+    :stale_after,
+    :observation
+  ]
 
   @type t :: %__MODULE__{
           path: Merlin.Path.t(),
@@ -23,7 +44,8 @@ defmodule Merlin.Fact do
           observed_at: integer(),
           source: term(),
           seq: pos_integer(),
-          stale_after: pos_integer() | nil
+          stale_after: pos_integer() | nil,
+          observation: pos_integer() | nil
         }
 
   @doc """

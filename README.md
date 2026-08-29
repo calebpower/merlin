@@ -517,6 +517,61 @@ a database written by an older, unhashed scheme.
 These work whether or not the daemon is running — SQLite in WAL mode lets both
 hold the file — so a key can be minted without an outage.
 
+## Watching it: `merlin`
+
+The daemon is `merlind`; `merlin` is how you look at it. With no arguments it
+opens a terminal interface; with any, it answers and exits.
+
+```sh
+merlin                      # the interface
+merlin --once               # render one frame to stdout and exit
+merlin --once --pane rules  # ...a particular pane, at a chosen size
+merlin key list             # one-shot, same as merlin-key
+merlin preflight
+```
+
+Four panes, on the number keys: **facts** (everything merlin believes, with
+how long ago each was last heard from), **rules** (both stateless rules and
+state machines, with the state each machine is actually in), **stream** (fact
+changes, events, and what became of every effect), and **devices** (groups and
+their members' current values).
+
+`j`/`k` move, `/` filters, `:` opens a command line, `q` quits.
+
+    :  set living_room_lamps off      command a group
+    :  fact person.cal.zone :home     write a fact by hand
+    :  = any_eq?(:exterior_doors, :open)
+                                      evaluate an expression against the world
+
+### Nothing typed reaches the house without a confirmation
+
+A command is *parsed*, then *resolved and described*, then run — three steps,
+and the description you confirm is generated from the resolved effects rather
+than from the text you typed. A mis-keyed binding cannot actuate something you
+did not read.
+
+While the daemon is in dry run, `y` confirms and the effect is logged and
+discarded. `!` confirms **and overrides dry run for that one command**. Two
+keys rather than a mode, because a mode can be left on and this should be
+chosen every time.
+
+There is deliberately no runtime dry-run toggle. It is snapshotted in three
+places, so flipping it live would leave stateless rules dry while machines ran
+live — worse than either extreme, and invisible.
+
+### Where it runs
+
+In its own BEAM on the daemon's host, talking to `merlind` over loopback
+distribution. Not inside the daemon: `System.halt/1` is reachable by name from
+a CLI, the daemon runs in embedded mode so a UI bug would mean restarting the
+house to fix it, and a terminal belongs to the process that owns it.
+
+The client loads every module but starts no application, which means
+`Merlin.Config.dry_run?()` answers `false` there. So only `Merlin.TUI.Remote`
+may reach daemon state, and a tier 1 test reads the compiled beams to enforce
+it — a banner reading LIVE while the daemon is dry is the failure that rule
+exists to prevent.
+
 ## Toolchain
 
 `exec = "host"` means reaper cannot pin this, so it is pinned here and asserted
@@ -562,6 +617,19 @@ not a pyramid. Each tier answers a question no cheaper tier can.
 | 7 | seeded fuzzing of every ingest seam |
 | 8 | concurrency, including the CLI writing while the daemon runs |
 | 9 | a simulated house against a shadow model and invariant checker |
+
+Tier 2 covers the terminal interface: a rendered frame is a deterministic
+character grid, which is a better conformance surface than markup — no cascade,
+no layout engine. It asserts structure (a frame is exactly the rect it was
+given; no cell holds a control character), layout against a specification
+written in the test rather than imported from the view, and *sensitivity* —
+perturb one datum and the frame must move, which is what proves a column is
+wired to the screen at all.
+
+Then `Merlin.Test.FrameMutations` corrupts a correct frame eight ways and
+requires every corruption to break at least one assertion. A golden file
+captured from an implementation blesses whatever that implementation did,
+including a marker it never rendered.
 
 `reaper/tiers.sh` writes a ledger to `out/tiers.tsv` in which every tier is
 `pass`, `FAIL`, or `not-built`. **A tier that is not built is never reported as

@@ -68,8 +68,32 @@ tier() {
         say "tier $n: pass"
     else
         note "$n" "FAIL" "$name"
-        say "tier $n: FAIL (see out/tier-$n.log)"
         failed=$((failed + 1))
+
+        # Keep the evidence somewhere the next run will not delete.
+        #
+        # build.sh clears $REAPER_OUT before every build, so a failing tier's
+        # log survived exactly until the next run. Tier 9 shrinks a failing
+        # trace over several minutes and then wrote it into a file with a
+        # lifetime of one loop -- the expensive work done and the answer thrown
+        # away. One intermittent violation was lost that way, and the seed
+        # alone did not bring it back.
+        #
+        # $REAPER_STATE is rolled back between scenarios but not cleared by the
+        # build, and the archive is keyed by tier, seed and time so two
+        # failures never collide.
+        archive="$REAPER_STATE/failures"
+        mkdir -p "$archive"
+        stamp=$(date -u '+%Y%m%dT%H%M%SZ')
+        kept="$archive/tier-$n-$stamp-seed-$SEED.log"
+        cp "$REAPER_OUT/tier-$n.log" "$kept" 2>/dev/null || true
+
+        # And a copy in out/, so it comes back with this run's results rather
+        # than staying on a guest nobody will log into.
+        cp "$REAPER_OUT/tier-$n.log" "$REAPER_OUT/FAILED-tier-$n.log" 2>/dev/null || true
+
+        say "tier $n: FAIL (out/tier-$n.log, kept as out/FAILED-tier-$n.log)"
+        say "        archived on the guest: $kept"
     fi
 }
 
@@ -103,7 +127,11 @@ export MIX_ENV=test
 
 tier 1 "pure unit" mix test --only tier1 --warnings-as-errors
 
-skip 2 "component conformance" "deferred to M9; no rendered markup exists yet"
+# Tier 2 is BUILT as of the TUI. The reason it was skipped -- "no rendered
+# markup exists yet" -- stopped being true the moment a view produced a
+# Merlin.TUI.Buffer, which is a deterministic character grid and a better
+# conformance surface than HTML: no cascade, no layout engine.
+tier 2 "component conformance" mix test --only tier2 --warnings-as-errors
 tier 3 "source-as-data" mix test --only tier3 --warnings-as-errors
 tier 4 "server contract" mix test --only tier4 --warnings-as-errors
 
@@ -130,7 +158,10 @@ fi
 
 tier 9 "simulated house" mix test --only tier9 --warnings-as-errors
 
-skip 10 "live browser audit" "deferred to M9"
+# Not "deferred to M9". M9's dashboard is not what happened -- the operator
+# interface is a TUI, and a browser audit has nothing to look at. Leaving the
+# old reason would have been a lie by omission the moment tier 2 turned on.
+skip 10 "live browser audit" "not applicable -- no web UI; the operator interface is a TUI, covered by tier 2"
 skip 11 "human evidence"     "not applicable -- single maintainer, no first-timer to observe"
 
 # ---------------------------------------------------------------------------

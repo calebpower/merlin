@@ -355,6 +355,67 @@ done
 # ---------------------------------------------------------------------------
 say "checking key management against the running daemon"
 
+# ---------------------------------------------------------------------------
+# The operator interface, from the actual release.
+#
+# --once renders one frame and exits, which is the only way a full-screen
+# program can be asserted on by a shell script. Without it this tier would have
+# nothing to look at and "the TUI works on a machine with no compiler" would be
+# a claim nobody had checked.
+# ---------------------------------------------------------------------------
+say "merlin --once"
+
+TUIBIN="$REL/bin/merlin"
+[ -x "$TUIBIN" ] || die "the merlin overlay is missing from the release"
+
+frame_out="$REAPER_OUT/smoke-tui-frame.txt"
+
+if "$TUIBIN" --once --cols 80 --rows 12 > "$frame_out" 2>"$REAPER_OUT/smoke-tui.err"; then
+    say "--once rendered a frame"
+else
+    cat "$REAPER_OUT/smoke-tui.err"
+    die "merlin --once failed against a running daemon"
+fi
+
+# A frame, not an error message that happened to exit zero.
+grep -q 'merlin' "$frame_out" || die "the frame does not name merlin"
+grep -q 'DRY-RUN\|LIVE' "$frame_out" || die "the frame carries no mode banner"
+
+# Every line exactly the width asked for. A frame one column wide wraps on a
+# real terminal and corrupts every cursor position after it.
+awk 'length != 80 { print "line " NR " is " length " columns, not 80"; bad=1 }
+     END { exit bad ? 1 : 0 }' "$frame_out"     || die "the frame is not rectangular"
+
+# No escape sequences: --once writes text, so a frame that carries them means
+# the renderer leaked ANSI into what should be plain output.
+if LC_ALL=C grep -q "$(printf '\033')" "$frame_out"; then
+    die "--once emitted escape sequences"
+fi
+
+# Every pane, not just the default. The default was the ONE that worked when
+# --pane was broken: it is the Session struct's default and therefore the only
+# atom that already existed in a client VM. Exercising one pane proved the
+# least.
+for pane in facts rules stream devices; do
+    if ! "$TUIBIN" --once --pane "$pane" --cols 80 --rows 10 \
+            > "$REAPER_OUT/smoke-tui-$pane.txt" 2>&1; then
+        cat "$REAPER_OUT/smoke-tui-$pane.txt"
+        die "merlin --once --pane $pane failed"
+    fi
+
+    awk -v p="$pane" 'length != 80 { print "pane " p " line " NR " is " length; bad=1 }
+         END { exit bad ? 1 : 0 }' "$REAPER_OUT/smoke-tui-$pane.txt" \
+        || die "the $pane pane is not rectangular"
+done
+say "all four panes rendered"
+
+say "merlin --help"
+"$TUIBIN" --help > "$REAPER_OUT/smoke-tui-help.txt" 2>&1     || die "merlin --help failed"
+grep -q 'override dry run' "$REAPER_OUT/smoke-tui-help.txt"     || die "help does not mention the dry-run override"
+
+say "merlin key list (the subcommand form)"
+"$TUIBIN" key list > "$REAPER_OUT/smoke-tui-key.txt" 2>&1     || die "merlin key list failed -- the one-shot path is broken"
+
 KEYBIN="$REL/bin/merlin-key"
 [ -x "$KEYBIN" ] || die "merlin-key overlay missing from the release"
 

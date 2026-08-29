@@ -22,6 +22,11 @@ defmodule Merlin.BusTest do
   # -- and with a shared root that made every sibling test's "expected zero
   # subscribers" assertion race against it. Unique roots make the tests
   # genuinely independent instead of accidentally so.
+  #
+  # There is exactly one subscription unique roots cannot defend against, and
+  # it is `subscribe([])`: the empty prefix matches every path, so uniqueness
+  # of the root is irrelevant to it. That test lives in its own sync module at
+  # the bottom of this file for that reason. Do not move it back.
   defp uniq, do: "bus-#{System.unique_integer([:positive])}"
 
   defp change(path), do: %Change{
@@ -66,12 +71,6 @@ defmodule Merlin.BusTest do
       assert_receive {:merlin, %Change{}}
 
       assert 1 = Bus.publish(change([root, "battery"]))
-      assert_receive {:merlin, %Change{}}
-    end
-
-    test "the empty prefix receives everything" do
-      Bus.subscribe([])
-      assert Bus.publish(change([uniq(), "anything"])) >= 1
       assert_receive {:merlin, %Change{}}
     end
 
@@ -172,5 +171,54 @@ defmodule Merlin.BusTest do
       assert eventually(fn -> Bus.publish(change(p)) == 0 end),
              "a dead subscriber was still receiving after 1s"
     end
+  end
+end
+
+defmodule Merlin.BusFirehoseTest do
+  @moduledoc """
+  Tier 1: the empty prefix, deliberately alone.
+
+  `Bus.subscribe([])` is a prefix of every path, so for as long as it is
+  registered it matches every other test's supposedly-unique root.
+  `Merlin.BusTest` defends against cross-test interference by giving each test
+  a unique ROOT, and this subscription walks straight through that defense --
+  uniqueness of a root means nothing to a prefix that matches everything.
+
+  Under most ExUnit seeds the two never overlap and the suite is green. Under
+  seed 419526 they do: "a sibling prefix receives nothing" asserts
+  `0 = Bus.publish(...)` and gets 1. A test that passes on most seeds and fails
+  on some is not a flake to be retried -- it is an assertion that was only ever
+  accidentally true.
+
+  So this one test runs `async: false`, after every async module has finished,
+  where it cannot overlap with a test making a global claim.
+
+  Both assertions survive intact. The alternative was to weaken the sibling
+  test's subscriber-count assertion to a bare `refute_receive`, which would
+  have stopped it noticing an over-delivery to somebody else -- trading a real
+  defect-detecting assertion for a green suite.
+  """
+
+  use ExUnit.Case, async: false
+
+  @moduletag :tier1
+
+  alias Merlin.{Bus, Change}
+
+  test "the empty prefix receives everything" do
+    Bus.subscribe([])
+
+    change = %Change{
+      path: ["firehose-#{System.unique_integer([:positive])}", "anything"],
+      old: :old,
+      new: :new,
+      at: 0,
+      source: nil,
+      seq: 1,
+      first?: false
+    }
+
+    assert Bus.publish(change) >= 1
+    assert_receive {:merlin, %Change{}}
   end
 end

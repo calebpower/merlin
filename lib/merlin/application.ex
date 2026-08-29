@@ -51,7 +51,24 @@ defmodule Merlin.Application do
         # supervisors that would otherwise own these.
         {Registry, keys: :unique, name: Merlin.Machine.Registry},
         {Registry, keys: :unique, name: Merlin.Derive.Registry}
-      ] ++ mqtt_children() ++ http_children()
+      ] ++
+        mqtt_children() ++
+        http_children() ++
+        [
+          # Last, deliberately. Under :rest_for_one a crash restarts every
+          # child AFTER the one that died, and this holds nothing but ephemeral
+          # confirmation tokens -- so putting it at the end means a Control
+          # crash costs a handful of unconfirmed commands and disturbs nothing
+          # else. Losing tokens when something upstream restarts is correct: a
+          # command prepared against the old world should not survive into the
+          # new one.
+          Merlin.Control,
+
+          # One tap per attached session, started on demand by Merlin.Tap.attach/2
+          # over distribution. Temporary children: a tap exists only for its
+          # client, and outlives it by no more than a monitor message.
+          {DynamicSupervisor, strategy: :one_for_one, name: Merlin.Tap.Supervisor}
+        ]
 
     opts = [
       strategy: :rest_for_one,
