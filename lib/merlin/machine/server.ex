@@ -33,6 +33,7 @@ defmodule Merlin.Machine.Server do
 
   alias Merlin.{Bus, Change, Effects, Event, Expr, Groups, Machine, Path, World}
   alias Merlin.Machine.Clause
+  alias Merlin.Rules.Env
 
   defstruct [:machine, :data, :dry_run]
 
@@ -269,12 +270,38 @@ defmodule Merlin.Machine.Server do
   defp matches?(%Clause{trigger: {:after, _}}, _subject, _env), do: false
   defp matches?(%Clause{trigger: {:idle_for, _}}, _subject, _env), do: false
 
-  defp matches?(%Clause{trigger: trigger, guard: guard}, subject, env) do
-    Merlin.Rule.trigger_fires?(trigger, subject) and guard_passes?(guard, env)
+  defp matches?(%Clause{trigger: trigger, guard: guard} = clause, subject, env) do
+    # Two reasons a clause does not match, and only one of them is news. A
+    # trigger that did not fire is the overwhelmingly common case -- every
+    # clause of the current state is tested against every event -- and saying
+    # so would bury the log. A trigger that DID fire and was then refused by
+    # its guard is the case somebody is trying to understand at 3am.
+    if Merlin.Rule.trigger_fires?(trigger, subject) do
+      case Env.guard(guard, env) do
+        :pass ->
+          true
+
+        {:refused, why} ->
+          refused(clause, why)
+          false
+      end
+    else
+      false
+    end
   end
 
-  defp guard_passes?(nil, _env), do: true
-  defp guard_passes?(guard, env), do: Expr.truthy?(Expr.eval(guard, env))
+  defp refused(%Clause{} = clause, why) when why in [false, :unknown] do
+    Logger.debug(fn ->
+      "clause declined: #{Env.describe_refusal(why)}" <> guard_source(clause)
+    end)
+  end
+
+  defp refused(%Clause{} = clause, why) do
+    Logger.warning("clause declined: #{Env.describe_refusal(why)}" <> guard_source(clause))
+  end
+
+  defp guard_source(%Clause{guard: nil}), do: ""
+  defp guard_source(%Clause{guard: guard}), do: " -- #{guard.source}"
 
   defp timeout_actions(%Machine{states: states}, state_name) do
     states
@@ -299,19 +326,12 @@ defmodule Merlin.Machine.Server do
     end
   end
 
-  defp base_env(trigger, %__MODULE__{data: data}) do
-    %{read: &read/1, trigger: trigger, locals: data, group: Groups.resolver()}
-  end
+  # One definition of what a guard sees, shared with the stateless engine. A
+  # machine's data slots are its locals, readable as `local.<slot>`.
+  defp base_env(trigger, %__MODULE__{data: data}), do: Env.build(trigger, data)
 
   defp trigger_env(%Change{} = c), do: Change.trigger_env(c)
   defp trigger_env(%Event{} = e), do: Event.trigger_env(e)
-
-  defp read(path) do
-    case World.fetch(path) do
-      {:ok, fact} -> if Merlin.Fact.stale?(fact), do: :unknown, else: fact.value
-      :error -> :unknown
-    end
-  end
 
   defp describe(%Change{path: p}), do: "change #{Path.to_string(p)}"
   defp describe(%Event{path: p}), do: "event #{Path.to_string(p)}"

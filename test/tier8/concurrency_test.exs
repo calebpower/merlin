@@ -209,4 +209,102 @@ defmodule Merlin.ConcurrencyTest do
       assert length(received) == 100
     end
   end
+
+  # --- attached sessions ----------------------------------------------------
+
+  describe "operators watching" do
+    # A tap attached to the test process dies when that process does, so
+    # cleanup races its own subject. An already-gone tap is the correct
+    # outcome, not an error.
+    defp stop(pid) do
+      Merlin.Tap.detach(pid)
+    catch
+      :exit, _ -> :ok
+    end
+
+    test "two sessions each get their own feed" do
+      # An operator on the console and one over SSH is the normal case. Each
+      # tap is its own process with its own bounded buffer, so a session that
+      # has stopped reading cannot hold up one that has not.
+      parent = self()
+      other = spawn_link(fn -> relay(parent) end)
+
+      {:ok, %{pid: mine}} = Merlin.Tap.attach(parent, flush_ms: 50)
+      {:ok, %{pid: theirs}} = Merlin.Tap.attach(other, flush_ms: 50)
+
+      on_exit(fn -> Enum.each([mine, theirs], &stop/1) end)
+
+      refute mine == theirs
+
+      root = "conc-#{System.unique_integer([:positive])}"
+      Merlin.Bus.publish(change([root, "n"], 1))
+
+      assert_receive {:merlin_tap, [{:change, _}]}, 2_000
+      assert_receive {:relayed, {:merlin_tap, [{:change, _}]}}, 2_000
+    end
+
+    test "a session that has stopped reading does not stall one that has not" do
+      # The idle client never drains its mailbox. Its tap fills, bounds itself
+      # and drops the oldest -- and the reading session is unaffected, because
+      # the buffering is per session rather than shared.
+      idle = spawn(fn -> Process.sleep(:infinity) end)
+      {:ok, %{pid: theirs}} = Merlin.Tap.attach(idle, flush_ms: 50, max_pending: 5)
+      {:ok, %{pid: mine}} = Merlin.Tap.attach(self(), flush_ms: 50)
+
+      on_exit(fn ->
+        Enum.each([mine, theirs], &stop/1)
+        Process.exit(idle, :kill)
+      end)
+
+      root = "conc-#{System.unique_integer([:positive])}"
+      for n <- 1..40, do: Merlin.Bus.publish(change([root, "n"], n))
+
+      assert_receive {:merlin_tap, items}, 2_000
+      assert length(items) > 0, "the reading session must still be served"
+    end
+
+    test "rendering does not block the fact writer" do
+      # The TUI reads through World.dump/1, which is :ets.tab2list in the
+      # CALLING process against a read_concurrency table. It never goes through
+      # Merlin.World.Writer, so a session refreshing ten times a second costs
+      # the writer nothing. Asserted by writing while reading, rather than by
+      # reading the implementation and believing it.
+      root = "conc-#{System.unique_integer([:positive])}"
+
+      reader = Task.async(fn -> for _ <- 1..200, do: Merlin.World.dump([]) end)
+
+      {elapsed, _} =
+        :timer.tc(fn ->
+          for n <- 1..200, do: Merlin.World.put([root, "w"], n)
+        end)
+
+      Task.await(reader, 10_000)
+
+      # Deliberately generous: this asserts the ABSENCE of blocking, not a
+      # performance target that would fail on a busy build host and teach
+      # everyone to ignore it.
+      assert elapsed < 5_000_000,
+             "200 writes took #{div(elapsed, 1000)}ms while a session was reading"
+    end
+  end
+
+  defp change(path, n) do
+    %Merlin.Change{
+      path: path,
+      old: n - 1,
+      new: n,
+      at: 0,
+      source: nil,
+      seq: n,
+      first?: false
+    }
+  end
+
+  defp relay(parent) do
+    receive do
+      msg ->
+        send(parent, {:relayed, msg})
+        relay(parent)
+    end
+  end
 end

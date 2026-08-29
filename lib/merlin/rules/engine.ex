@@ -34,7 +34,8 @@ defmodule Merlin.Rules.Engine do
   use GenServer
   require Logger
 
-  alias Merlin.{Bus, Change, Effects, Event, Expr, Groups, Rule}
+  alias Merlin.{Bus, Change, Effects, Event, Groups, Rule}
+  alias Merlin.Rules.Env
 
   defstruct [:rules, :dry_run]
 
@@ -91,12 +92,9 @@ defmodule Merlin.Rules.Engine do
   # --- dispatch -------------------------------------------------------------
 
   defp dispatch(subject, trigger, cause_opts, state) do
-    env = %{
-      read: &read/1,
-      trigger: trigger,
-      group: Groups.resolver(),
-      locals: %{}
-    }
+    # One definition of what a guard sees, shared with the machines and with
+    # anything that needs to evaluate a guard the way the engine would.
+    env = Env.build(trigger)
 
     state.rules
     |> Enum.filter(&Rule.fires?(&1, subject))
@@ -104,17 +102,21 @@ defmodule Merlin.Rules.Engine do
   end
 
   defp run(rule, env, cause_opts, state) do
-    if guard_passes?(rule, env) do
-      case Effects.resolve(rule.actions, env, Groups.all()) do
-        {:ok, effects} ->
-          Effects.perform(effects, rule: rule.id, dry_run: state.dry_run, cause: cause_opts)
+    case Env.guard(rule.guard, env) do
+      :pass ->
+        case Effects.resolve(rule.actions, env, Groups.all()) do
+          {:ok, effects} ->
+            Effects.perform(effects, rule: rule.id, dry_run: state.dry_run, cause: cause_opts)
 
-        {:skip, reason} ->
-          # Most often {:unknown_value, _}: an action's expression evaluated to
-          # :unknown. Acting anyway is precisely what three-valued logic exists
-          # to prevent, so the rule declines rather than guessing.
-          Logger.debug("rule #{rule.id} skipped: #{inspect(reason)}")
-      end
+          {:skip, reason} ->
+            # Most often {:unknown_value, _}: an action's expression evaluated
+            # to :unknown. Acting anyway is precisely what three-valued logic
+            # exists to prevent, so the rule declines rather than guessing.
+            Logger.debug("rule #{rule.id} skipped: #{inspect(reason)}")
+        end
+
+      {:refused, why} ->
+        refused(rule, why)
     end
   rescue
     e ->
@@ -124,18 +126,31 @@ defmodule Merlin.Rules.Engine do
       Logger.warning("rule #{rule.id} threw #{kind}: #{inspect(reason)} -- skipped")
   end
 
-  # A guard fires only on literal true. :unknown never fires, which is the
-  # whole point: "we do not know" must not read as "yes".
-  defp guard_passes?(%Rule{guard: nil}, _env), do: true
-  defp guard_passes?(%Rule{guard: guard}, env), do: Expr.truthy?(Expr.eval(guard, env))
+  # A rule that declines is no longer silent.
+  #
+  # Debug, not info, because at house event rates every guard that is merely
+  # false would otherwise be a log line -- and "the door is shut, so the
+  # lights-off rule did nothing" is not news. What IS news is the guard source,
+  # which is carried so the answer does not require opening the config.
+  #
+  # A guard that is neither true nor false is a different matter and warns: the
+  # rule can never fire, no operator would ever guess why, and it costs nothing
+  # to say so because a well-formed config never produces one.
+  defp refused(%Rule{} = rule, why) when why in [false, :unknown] do
+    Logger.debug(fn ->
+      "rule #{rule.id} did not fire: #{Env.describe_refusal(why)}" <> guard_source(rule)
+    end)
+  end
+
+  defp refused(%Rule{} = rule, why) do
+    Logger.warning(
+      "rule #{rule.id} did not fire: #{Env.describe_refusal(why)}" <> guard_source(rule)
+    )
+  end
+
+  defp guard_source(%Rule{guard: nil}), do: ""
+  defp guard_source(%Rule{guard: guard}), do: " -- #{guard.source}"
 
   defp trigger_env(%Change{} = c), do: Change.trigger_env(c)
   defp trigger_env(%Event{} = e), do: Event.trigger_env(e)
-
-  defp read(path) do
-    case Merlin.World.fetch(path) do
-      {:ok, fact} -> if Merlin.Fact.stale?(fact), do: :unknown, else: fact.value
-      :error -> :unknown
-    end
-  end
 end

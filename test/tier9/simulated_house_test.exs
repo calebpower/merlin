@@ -303,6 +303,38 @@ defmodule Merlin.SimulatedHouseTest do
       assert msg =~ "no :exterior_doors members"
     end
 
+    test "tui_never_lies is quiet when the frame tells the truth" do
+      # The control. Without it, an invariant that reported nothing whatever
+      # would satisfy the two cases below and look rigorous.
+      honest = [entry(1, facts: %{[:door, "front", :contact] => :open})]
+
+      assert Invariants.tui_never_lies(honest) == []
+    end
+
+    test "tui_never_lies catches a row the frame never drew" do
+      # The shape a scroll bug takes: the fact is real, the screen looks fine,
+      # and the row simply is not there. An operator reads a house with one
+      # fewer door than it has.
+      timeline = [entry(1, facts: %{[:door, "front", :contact] => :open})]
+
+      dropped = fn _facts -> "" end
+
+      assert [message] = Invariants.tui_never_lies(timeline, dropped)
+      assert message =~ "door.front.contact"
+    end
+
+    test "tui_never_lies catches a value formatted from somewhere else" do
+      # The defect an operator cannot catch: well-formed, correctly laid out,
+      # and wrong. It does not look like a fault -- it looks like a house
+      # behaving oddly, and they go and investigate the house.
+      timeline = [entry(1, facts: %{[:door, "front", :contact] => :open})]
+
+      lying = fn _facts -> "door.front.contact  :closed" end
+
+      assert [message] = Invariants.tui_never_lies(timeline, lying)
+      assert message =~ ":open", "the complaint must name the value that was true"
+    end
+
     # The meta-assertion. If someone adds an invariant and no self-test, this
     # notices -- otherwise the suite grows checks nobody has shown can fail.
     test "every invariant has a self-test that makes it fire" do
@@ -313,6 +345,7 @@ defmodule Merlin.SimulatedHouseTest do
           :latch_never_fires_at_home,
           :latch_never_fires_on_a_lost_phone,
           :latch_only_fires_on_an_exterior_door,
+          :tui_never_lies,
           :latch_stays_fired_until_home,
           :nothing_published_while_settling,
           :lamps_never_commanded_in_daylight,
@@ -568,6 +601,7 @@ defmodule Merlin.SimulatedHouseTest do
         """)
 
         {shrunk, complete?} = shrink(actions, seed)
+        fixture = save_trace(shrunk, seed, violations, complete?)
 
         flunk("""
         tier 9 found #{length(violations)} invariant violation(s) with seed #{seed}.
@@ -577,6 +611,11 @@ defmodule Merlin.SimulatedHouseTest do
 
         #{if complete?, do: "Shrunk trace", else: "PARTIALLY shrunk trace (budget exhausted -- this is not minimal)"} (#{length(shrunk)} of #{length(actions)} actions):
         #{Enum.map_join(shrunk, "\n", &"  #{inspect(&1)}")}
+
+        The trace is written to #{fixture}, which comes back with this run's
+        results. Commit it: the SEED does not reproduce this on its own -- it
+        fixes the sequence of device actions, not the scheduler -- and a trace
+        that lives only in a log is deleted by the next run.
 
         Replay in a reaper session with:
             echo #{seed} > reaper/sim-seed && reaper test
@@ -682,5 +721,42 @@ defmodule Merlin.SimulatedHouseTest do
         SimHouse.stop(house)
       end
     end
+  end
+
+  # Write the shrunk trace where it will survive.
+  #
+  # Shrinking costs minutes and produces the one thing that actually explains a
+  # failure -- and it used to go into out/tier-9.log, which build.sh clears at
+  # the start of the next run. An intermittent violation was lost exactly that
+  # way, and re-running under the recorded seed did not bring it back, because
+  # a seed fixes the ACTIONS and not the scheduler.
+  #
+  # So the trace is written as a term file: it comes back with this run's
+  # results and can be committed as a regression case. A trace replays the
+  # actions deterministically even when the interleaving does not cooperate,
+  # which is the difference between "we saw something once" and "here is the
+  # case".
+  defp save_trace(shrunk, seed, violations, complete?) do
+    dir = System.get_env("REAPER_OUT") || Path.join(System.tmp_dir!(), "merlin")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "FAILED-tier9-trace-seed-#{seed}.exs")
+    names = Enum.map(violations, &elem(&1, 0))
+
+    File.write!(path, """
+    # A tier 9 trace that violated an invariant. Committable as a regression
+    # case: feed `actions` to the house in order and re-check the invariants.
+    #
+    # seed:   #{seed}
+    # shrunk: #{if complete?, do: "yes", else: "no -- budget exhausted, not minimal"}
+    # found:  #{DateTime.utc_now() |> DateTime.to_iso8601()}
+    %{
+      seed: #{seed},
+      shrunk?: #{complete?},
+      violations: #{inspect(names)},
+      actions: #{inspect(shrunk, limit: :infinity, pretty: true)}
+    }
+    """)
+
+    path
   end
 end

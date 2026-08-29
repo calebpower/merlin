@@ -28,6 +28,20 @@ defmodule Merlin.Test.Invariants do
   is an invariant nobody will read, and one that reconstructs it wrongly fails
   silently in the direction of passing.
 
+  ## A seed fixes the trace, not the interleaving
+
+  `MERLIN_SIM_SEED` makes the *sequence of device actions* reproducible. It
+  does not make the run deterministic: the daemon is a supervision tree of real
+  processes, and which of them observes a fact between two writes is decided by
+  the scheduler, not by the seed.
+
+  So a violation found under a seed may not recur under it. That is not the
+  harness failing -- an intermittent defect is still a defect, and finding one
+  at all is the point -- but it means "pin with MERLIN_SIM_SEED" promises more
+  than it delivers, and a re-run that passes is NOT evidence the defect is
+  gone. Two single samples of a nondeterministic process cannot be compared,
+  and treating them as an A/B is how a real race gets recorded as fixed.
+
   ## Every invariant must be shown to fire
 
   "An invariant that never fires is indistinguishable from a passing suite."
@@ -48,6 +62,7 @@ defmodule Merlin.Test.Invariants do
       {:latch_never_fires_at_home, &latch_never_fires_at_home/1},
       {:latch_never_fires_on_a_lost_phone, &latch_never_fires_on_a_lost_phone/1},
       {:latch_only_fires_on_an_exterior_door, &latch_only_fires_on_an_exterior_door/1},
+      {:tui_never_lies, &tui_never_lies/1},
       {:nothing_published_while_settling, &nothing_published_while_settling/1},
       {:latch_stays_fired_until_home, &latch_stays_fired_until_home/1},
       {:lamps_never_commanded_in_daylight, &lamps_never_commanded_in_daylight/1},
@@ -229,6 +244,108 @@ defmodule Merlin.Test.Invariants do
   defp door_room(_entry), do: :error
 
   @doc """
+  Every fact the operator's screen displays is the fact merlin holds.
+
+  The defect this exists for is the one an operator cannot catch: a frame that
+  is well-formed, correctly laid out, and *wrong*. A stale render, a scroll
+  window pointing one row off, a value formatted from the previous tick -- none
+  of those look like faults. They look like a house behaving oddly, and the
+  person reading the screen goes and investigates the house.
+
+  No cheaper tier can see it. Tier 2 renders scenes somebody wrote by hand, so
+  it only ever asks about the situations that were imagined. This renders the
+  world as it actually stood at two hundred points of a seeded run, and asks
+  the frame to agree with it every time.
+
+  Read from the timeline rather than by attaching a session: `facts` is already
+  recorded per entry, and reconstructing the screen from it needs no daemon, no
+  terminal and no tap. What it therefore does NOT prove is that the client
+  receives the right scene -- that is delivery, and tier 5 owns it.
+  """
+  @spec tui_never_lies(timeline()) :: [binary()]
+  def tui_never_lies(timeline), do: tui_never_lies(timeline, &render_facts/1)
+
+  @doc """
+  As above, against a supplied renderer.
+
+  The renderer is a parameter for one reason: without it this invariant is
+  almost incapable of failing. It renders from the same facts it then checks,
+  so the view and the expectation agree by construction, and a self-test cannot
+  create a disagreement between them.
+
+  Passing in a renderer that drops a row or corrupts a value is how the
+  invariant is shown to fire -- the same argument as
+  `latch_only_fires_on_an_exterior_door/2`, and the same reason: an invariant
+  that has never been made to complain is indistinguishable from one that
+  cannot.
+  """
+  @spec tui_never_lies(timeline(), (map() -> binary())) :: [binary()]
+  def tui_never_lies(timeline, render) do
+    Enum.flat_map(timeline, fn entry ->
+      facts = Map.get(entry, :facts) || %{}
+
+      if map_size(facts) == 0 do
+        []
+      else
+        text = render.(facts)
+
+        facts
+        |> Enum.reject(fn {path, value} -> shown?(text, path, value) end)
+        |> Enum.map(fn {path, value} ->
+          "at seq #{entry.seq} the frame does not show " <>
+            "#{Merlin.Path.to_string(path)} = #{inspect(value)}"
+        end)
+      end
+    end)
+  end
+
+  @doc false
+  # A frame wide enough that nothing is truncated and tall enough that nothing
+  # scrolls, because this invariant is about truthfulness rather than layout --
+  # tier 2 owns what happens when a column is too narrow.
+  def render_facts(facts) do
+    scene = %Merlin.TUI.Scene{
+      facts: Enum.map(facts, fn {path, value} -> as_fact(path, value) end),
+      now: 0
+    }
+
+    scene
+    |> Merlin.TUI.View.Facts.render(%{}, {160, map_size(facts) + 3})
+    |> Merlin.TUI.Buffer.to_text()
+  end
+
+  defp as_fact(path, value) do
+    %Merlin.Fact{
+      path: path,
+      value: value,
+      changed_at: 0,
+      observed_at: 0,
+      source: nil,
+      seq: 1,
+      stale_after: nil
+    }
+  end
+
+  # The row for this path must carry this value. Compared against what the view
+  # itself would render -- Scene.value/1 -- rather than against inspect/1, so
+  # this asserts agreement with the display rather than re-deciding formatting
+  # and then disagreeing with the thing under test about it.
+  defp shown?(text, path, value) do
+    rendered = Merlin.TUI.Scene.value(value)
+    path_string = Merlin.Path.to_string(path)
+
+    text
+    |> String.split("\n")
+    |> Enum.any?(fn line ->
+      String.starts_with?(line, path_string) and String.contains?(line, visible(rendered))
+    end)
+  end
+
+  # The value column is fourteen wide, so a longer value is legitimately shown
+  # truncated. Asserting the whole of it would fail on honest rendering.
+  defp visible(rendered), do: String.slice(rendered, 0, 14)
+
+  @doc """
   A latch that un-latches on its own is not a latch.
 
   Once fired it stays fired until the phone arrives home. Any other transition
@@ -238,17 +355,42 @@ defmodule Merlin.Test.Invariants do
   """
   @spec latch_stays_fired_until_home(timeline()) :: [binary()]
   def latch_stays_fired_until_home(timeline) do
+    indexed = Enum.with_index(timeline)
+
     timeline
     |> transitions([:rule, :intruder_latch, :state])
     |> Enum.flat_map(fn {entry, from, to} ->
       zone = Map.get(entry.facts, [:person, :owner, :zone])
 
       if from == :fired and to == :armed and zone != :home do
-        ["the latch re-armed at seq #{entry.seq} with the phone at #{inspect(zone)}, not home"]
+        # Both the zone AT the entry and the zone BEFORE it.
+        #
+        # The timeline records facts once per step, after everything that step
+        # caused has settled. So a zone that legitimately entered :home and
+        # then moved on within the same step is indistinguishable, from the
+        # snapshot alone, from one that was never :home at all -- and those are
+        # completely different defects. Reporting only the first made this
+        # invariant able to say something was wrong without saying what.
+        ["the latch re-armed at seq #{entry.seq} with the phone at #{inspect(zone)}, " <>
+           "not home (it was #{inspect(previous_zone(indexed, entry))} in the step before, " <>
+           "and this step was #{inspect(entry.note)})"]
       else
         []
       end
     end)
+  end
+
+  defp previous_zone(indexed, entry) do
+    case Enum.find(indexed, fn {e, _i} -> e.seq == entry.seq end) do
+      {_e, 0} -> :none
+      {_e, i} ->
+        indexed
+        |> Enum.at(i - 1)
+        |> elem(0)
+        |> Map.get(:facts)
+        |> Map.get([:person, :owner, :zone])
+      nil -> :none
+    end
   end
 
   # --- bug 8 ---------------------------------------------------------------
