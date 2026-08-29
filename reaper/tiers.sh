@@ -68,8 +68,32 @@ tier() {
         say "tier $n: pass"
     else
         note "$n" "FAIL" "$name"
-        say "tier $n: FAIL (see out/tier-$n.log)"
         failed=$((failed + 1))
+
+        # Keep the evidence somewhere the next run will not delete.
+        #
+        # build.sh clears $REAPER_OUT before every build, so a failing tier's
+        # log survived exactly until the next run. Tier 9 shrinks a failing
+        # trace over several minutes and then wrote it into a file with a
+        # lifetime of one loop -- the expensive work done and the answer thrown
+        # away. One intermittent violation was lost that way, and the seed
+        # alone did not bring it back.
+        #
+        # $REAPER_STATE is rolled back between scenarios but not cleared by the
+        # build, and the archive is keyed by tier, seed and time so two
+        # failures never collide.
+        archive="$REAPER_STATE/failures"
+        mkdir -p "$archive"
+        stamp=$(date -u '+%Y%m%dT%H%M%SZ')
+        kept="$archive/tier-$n-$stamp-seed-$SEED.log"
+        cp "$REAPER_OUT/tier-$n.log" "$kept" 2>/dev/null || true
+
+        # And a copy in out/, so it comes back with this run's results rather
+        # than staying on a guest nobody will log into.
+        cp "$REAPER_OUT/tier-$n.log" "$REAPER_OUT/FAILED-tier-$n.log" 2>/dev/null || true
+
+        say "tier $n: FAIL (out/tier-$n.log, kept as out/FAILED-tier-$n.log)"
+        say "        archived on the guest: $kept"
     fi
 }
 
