@@ -1,0 +1,57 @@
+#!/bin/sh
+#
+# merlin: the operator interface.
+#
+# With no arguments this opens the terminal UI; with any, it answers and exits.
+# The shape `screen` has, and for the same reason -- "the thing I run" and "the
+# thing I script" being two different names is a distinction nobody remembers
+# at 3am.
+#
+# The UI runs in its OWN beam, not in the daemon. `eval` boots a separate VM
+# with the release's code loaded and no application started, which is exactly
+# what a client wants: the daemon's schedulers are not shared with a render
+# loop, System.halt/1 cannot reach the house, and a TUI bug is fixed by running
+# a new client rather than by restarting a daemon that runs in embedded mode.
+set -eu
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
+MERLIN_ARGV=$(printf '%s\n' "$@")
+export MERLIN_ARGV
+
+# One-shot commands never touch the tty, so they take the simple path and may
+# exec: there is nothing to restore afterwards.
+case "${1:-}" in
+    key|preflight|help|--help|-h|--version|--once)
+        exec "$SCRIPT_DIR/merlind" eval 'Merlin.CLI.run()'
+        ;;
+esac
+
+# From here on the terminal is ours, and giving it back is not optional.
+#
+# The trap must outlive the program, so this deliberately does NOT exec: exec
+# replaces this shell and takes the trap with it, and a TUI that dies badly
+# would then leave the operator in raw mode with no echo and no cursor -- a
+# shell that still works and looks broken, which is the worst outcome here.
+#
+# restore runs on every path: normal exit, Ctrl-C, SIGTERM, and a dropped SSH
+# session (HUP). It is idempotent, so the loop's own restore doing it first
+# costs nothing.
+saved=$(stty -g)
+
+restore() {
+    stty "$saved" 2>/dev/null || true
+    # Reset attributes, show the cursor, leave the alternate screen. Written
+    # here as well as in Merlin.TUI.Render because this has to work when no
+    # Elixir ran at all -- a VM that failed to boot still leaves a terminal.
+    printf '\033[0m\033[?25h\033[?1049l'
+}
+
+trap restore EXIT INT TERM HUP
+stty raw -echo
+
+status=0
+"$SCRIPT_DIR/merlind" eval 'Merlin.CLI.run()' || status=$?
+
+restore
+exit "$status"

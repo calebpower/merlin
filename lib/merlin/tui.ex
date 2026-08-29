@@ -51,6 +51,36 @@ defmodule Merlin.TUI do
     end
   end
 
+  @doc """
+  Render one frame to stdout and exit.
+
+  The reason this exists is testability, not convenience. A full-screen program
+  cannot be asserted on by a shell script, so tier 6 -- the tier that proves
+  this works on a target with no compiler -- would have nothing to look at. It
+  also makes the thing screenshot-able in a bug report: `merlin --once > frame`
+  is a fault report that does not depend on anybody's terminal.
+
+  No raw mode, no alternate screen, no reader. It draws and stops.
+  """
+  @spec once(keyword()) :: :ok | {:error, binary()}
+  def once(opts \\ []) do
+    node = Keyword.get(opts, :node, default_node())
+    {w, h} = Keyword.get(opts, :size, Term.size())
+
+    with {:ok, attached} <- Remote.attach(node),
+         {:ok, scene} <- Remote.scene(node) do
+      session = %Session{size: {w, h}, pane: Keyword.get(opts, :pane, :facts)}
+      frame = compose(%{scene | version: attached.version}, session, w, h)
+
+      IO.puts(Merlin.TUI.Buffer.to_text(frame))
+      Remote.detach(node, attached.tap)
+      :ok
+    else
+      {:error, message} when is_binary(message) -> fail(message)
+      {:error, reason} -> fail(inspect(reason))
+    end
+  end
+
   defp run(attached, opts) do
     {w, h} = Term.size()
 
@@ -218,18 +248,23 @@ defmodule Merlin.TUI do
 
   defp draw(state) do
     {w, h} = state.session.size
-    rects = Layout.screen(w, h)
     scene = %{state.scene | stream: state.stream, dropped: state.dropped}
 
-    frame =
-      Merlin.TUI.Buffer.new(w, h)
-      |> stamp(Chrome.header(scene, state.session, rects.header), rects.header)
-      |> stamp(body(scene, state.session, rects.body), rects.body)
-      |> stamp(Chrome.status(scene, state.session, rects.status), rects.status)
-      |> stamp(Chrome.command(scene, state.session, rects.command), rects.command)
-
-    Term.write(Render.paint(frame))
+    Term.write(Render.paint(compose(scene, state.session, w, h)))
     %{state | dirty: false}
+  end
+
+  # One frame, from a scene and a session. Shared with once/1 so a screenshot
+  # is the same frame the operator sees rather than a second implementation
+  # that can drift from it.
+  defp compose(scene, session, w, h) do
+    rects = Layout.screen(w, h)
+
+    Merlin.TUI.Buffer.new(w, h)
+    |> stamp(Chrome.header(scene, session, rects.header), rects.header)
+    |> stamp(body(scene, session, rects.body), rects.body)
+    |> stamp(Chrome.status(scene, session, rects.status), rects.status)
+    |> stamp(Chrome.command(scene, session, rects.command), rects.command)
   end
 
   defp body(scene, session, rect) do

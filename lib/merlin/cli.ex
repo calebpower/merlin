@@ -43,6 +43,119 @@ defmodule Merlin.CLI do
     end
   end
 
+  @doc """
+  The `merlin` entry point: a TUI with no arguments, a one-shot tool with them.
+
+  The shape `screen` has. Bare `merlin` opens the interface; `merlin key list`
+  answers and exits. One binary, because "the thing I run" and "the thing I
+  script" being two names is a distinction nobody remembers at 3am.
+
+  Distribution is started here rather than by the release, because `eval` boots
+  a node without it. That is the right default for `merlin-key` -- a separate
+  VM, no cluster -- and the wrong one for a client that has to reach the
+  daemon, so the client asks for what it needs instead of the release offering
+  it to everything.
+  """
+  @spec run([binary()]) :: :ok | no_return()
+  def run(argv \\ argv())
+
+  def run([]), do: tui(&Merlin.TUI.main/1, [])
+  def run(["--once" | rest]), do: tui(&Merlin.TUI.once/1, once_opts(rest))
+  def run(["key" | rest]), do: key(rest)
+  def run(["preflight" | _]), do: Merlin.Preflight.run!()
+  def run(["--version" | _]), do: version()
+  def run([help | _]) when help in ["--help", "-h", "help"], do: usage()
+  def run([other | _]), do: die("unknown command #{inspect(other)}. Try: merlin --help")
+
+  # Every branch halts: success, failure and an unstartable distribution. Said
+  # in a spec rather than worked around by loosening dialyzer's flags, which
+  # would stop it noticing the next function that unexpectedly does not return.
+  @spec tui((keyword() -> :ok | {:error, term()}), keyword()) :: no_return()
+  defp tui(fun, opts) do
+    case start_distribution() do
+      :ok ->
+        case fun.(opts) do
+          :ok -> System.halt(0)
+          {:error, _} -> System.halt(1)
+        end
+
+      {:error, reason} ->
+        die("could not start distribution: #{inspect(reason)}")
+    end
+  end
+
+  # A unique node name per session, so two operators on one host do not
+  # collide, and the release's cookie, because the daemon will not talk to a
+  # node that cannot present it.
+  defp start_distribution do
+    name = :"merlin-tui-#{System.unique_integer([:positive])}@127.0.0.1"
+
+    case Node.start(name, name_domain: :longnames) do
+      {:ok, _} ->
+        case System.get_env("RELEASE_COOKIE") do
+          nil -> :ok
+          cookie -> Node.set_cookie(String.to_atom(cookie))
+        end
+
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp once_opts(rest) do
+    {parsed, _, _} =
+      OptionParser.parse(rest, strict: [pane: :string, cols: :integer, rows: :integer])
+
+    [] |> put_pane(parsed[:pane]) |> put_size(parsed[:cols], parsed[:rows])
+  end
+
+  defp put_pane(opts, nil), do: opts
+
+  defp put_pane(opts, pane) do
+    if pane in ~w(facts rules stream devices) do
+      Keyword.put(opts, :pane, String.to_existing_atom(pane))
+    else
+      die("no pane #{inspect(pane)}. Try: facts, rules, stream, devices")
+    end
+  end
+
+  defp put_size(opts, cols, rows) when is_integer(cols) and is_integer(rows),
+    do: Keyword.put(opts, :size, {cols, rows})
+
+  defp put_size(opts, _cols, _rows), do: opts
+
+  @spec version() :: no_return()
+  defp version do
+    IO.puts("merlin #{Application.spec(:merlin, :vsn)}")
+    System.halt(0)
+  end
+
+  @spec usage() :: no_return()
+  defp usage do
+    IO.puts("""
+    merlin -- the operator interface to a merlin daemon
+
+      merlin                  open the terminal interface
+      merlin --once [opts]    render one frame to stdout and exit
+                              --pane facts|rules|stream|devices
+                              --cols N --rows N
+      merlin key ...          manage ingress keys (add, list, rm, import)
+      merlin preflight        validate the configuration and exit
+      merlin --version
+
+    With no arguments it opens the interface; with any, it answers and exits.
+
+    Inside:
+      1-4     switch pane        j/k  move           /  filter
+      :       command line       q    quit
+      y       confirm            !    confirm AND override dry run
+    """)
+
+    System.halt(0)
+  end
+
   @doc "Entry point. `Merlin.CLI.main(:key, Merlin.CLI.argv())`."
   def main(:key, argv), do: key(argv)
 
@@ -151,7 +264,16 @@ defmodule Merlin.CLI do
     end
   end
 
-  defp key(_), do: die("usage: merlin-key (add --topic T [--label L] [--expires N] | list | rm (--id N|--prefix P|--key K) | import --from PATH)")
+  defp key(_) do
+    die("""
+    usage: merlin key <command>   (or the merlin-key alias)
+
+      add --topic T [--label L] [--expires N]
+      list
+      rm (--id N | --prefix P | --key K)
+      import --from PATH
+    """)
+  end
 
   defp stamp(nil), do: "never"
 
@@ -161,7 +283,7 @@ defmodule Merlin.CLI do
 
   @spec die(binary()) :: no_return()
   defp die(message) do
-    IO.puts(:stderr, "merlin-key: #{message}")
+    IO.puts(:stderr, "merlin: #{message}")
     System.halt(1)
   end
 end

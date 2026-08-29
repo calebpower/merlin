@@ -28,6 +28,20 @@ defmodule Merlin.Test.Invariants do
   is an invariant nobody will read, and one that reconstructs it wrongly fails
   silently in the direction of passing.
 
+  ## A seed fixes the trace, not the interleaving
+
+  `MERLIN_SIM_SEED` makes the *sequence of device actions* reproducible. It
+  does not make the run deterministic: the daemon is a supervision tree of real
+  processes, and which of them observes a fact between two writes is decided by
+  the scheduler, not by the seed.
+
+  So a violation found under a seed may not recur under it. That is not the
+  harness failing -- an intermittent defect is still a defect, and finding one
+  at all is the point -- but it means "pin with MERLIN_SIM_SEED" promises more
+  than it delivers, and a re-run that passes is NOT evidence the defect is
+  gone. Two single samples of a nondeterministic process cannot be compared,
+  and treating them as an A/B is how a real race gets recorded as fixed.
+
   ## Every invariant must be shown to fire
 
   "An invariant that never fires is indistinguishable from a passing suite."
@@ -238,17 +252,42 @@ defmodule Merlin.Test.Invariants do
   """
   @spec latch_stays_fired_until_home(timeline()) :: [binary()]
   def latch_stays_fired_until_home(timeline) do
+    indexed = Enum.with_index(timeline)
+
     timeline
     |> transitions([:rule, :intruder_latch, :state])
     |> Enum.flat_map(fn {entry, from, to} ->
       zone = Map.get(entry.facts, [:person, :owner, :zone])
 
       if from == :fired and to == :armed and zone != :home do
-        ["the latch re-armed at seq #{entry.seq} with the phone at #{inspect(zone)}, not home"]
+        # Both the zone AT the entry and the zone BEFORE it.
+        #
+        # The timeline records facts once per step, after everything that step
+        # caused has settled. So a zone that legitimately entered :home and
+        # then moved on within the same step is indistinguishable, from the
+        # snapshot alone, from one that was never :home at all -- and those are
+        # completely different defects. Reporting only the first made this
+        # invariant able to say something was wrong without saying what.
+        ["the latch re-armed at seq #{entry.seq} with the phone at #{inspect(zone)}, " <>
+           "not home (it was #{inspect(previous_zone(indexed, entry))} in the step before, " <>
+           "and this step was #{inspect(entry.note)})"]
       else
         []
       end
     end)
+  end
+
+  defp previous_zone(indexed, entry) do
+    case Enum.find(indexed, fn {e, _i} -> e.seq == entry.seq end) do
+      {_e, 0} -> :none
+      {_e, i} ->
+        indexed
+        |> Enum.at(i - 1)
+        |> elem(0)
+        |> Map.get(:facts)
+        |> Map.get([:person, :owner, :zone])
+      nil -> :none
+    end
   end
 
   # --- bug 8 ---------------------------------------------------------------
