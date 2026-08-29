@@ -601,6 +601,7 @@ defmodule Merlin.SimulatedHouseTest do
         """)
 
         {shrunk, complete?} = shrink(actions, seed)
+        fixture = save_trace(shrunk, seed, violations, complete?)
 
         flunk("""
         tier 9 found #{length(violations)} invariant violation(s) with seed #{seed}.
@@ -610,6 +611,11 @@ defmodule Merlin.SimulatedHouseTest do
 
         #{if complete?, do: "Shrunk trace", else: "PARTIALLY shrunk trace (budget exhausted -- this is not minimal)"} (#{length(shrunk)} of #{length(actions)} actions):
         #{Enum.map_join(shrunk, "\n", &"  #{inspect(&1)}")}
+
+        The trace is written to #{fixture}, which comes back with this run's
+        results. Commit it: the SEED does not reproduce this on its own -- it
+        fixes the sequence of device actions, not the scheduler -- and a trace
+        that lives only in a log is deleted by the next run.
 
         Replay in a reaper session with:
             echo #{seed} > reaper/sim-seed && reaper test
@@ -715,5 +721,42 @@ defmodule Merlin.SimulatedHouseTest do
         SimHouse.stop(house)
       end
     end
+  end
+
+  # Write the shrunk trace where it will survive.
+  #
+  # Shrinking costs minutes and produces the one thing that actually explains a
+  # failure -- and it used to go into out/tier-9.log, which build.sh clears at
+  # the start of the next run. An intermittent violation was lost exactly that
+  # way, and re-running under the recorded seed did not bring it back, because
+  # a seed fixes the ACTIONS and not the scheduler.
+  #
+  # So the trace is written as a term file: it comes back with this run's
+  # results and can be committed as a regression case. A trace replays the
+  # actions deterministically even when the interleaving does not cooperate,
+  # which is the difference between "we saw something once" and "here is the
+  # case".
+  defp save_trace(shrunk, seed, violations, complete?) do
+    dir = System.get_env("REAPER_OUT") || Path.join(System.tmp_dir!(), "merlin")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "FAILED-tier9-trace-seed-#{seed}.exs")
+    names = Enum.map(violations, &elem(&1, 0))
+
+    File.write!(path, """
+    # A tier 9 trace that violated an invariant. Committable as a regression
+    # case: feed `actions` to the house in order and re-check the invariants.
+    #
+    # seed:   #{seed}
+    # shrunk: #{if complete?, do: "yes", else: "no -- budget exhausted, not minimal"}
+    # found:  #{DateTime.utc_now() |> DateTime.to_iso8601()}
+    %{
+      seed: #{seed},
+      shrunk?: #{complete?},
+      violations: #{inspect(names)},
+      actions: #{inspect(shrunk, limit: :infinity, pretty: true)}
+    }
+    """)
+
+    path
   end
 end
