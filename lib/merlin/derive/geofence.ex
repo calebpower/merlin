@@ -232,7 +232,7 @@ defmodule Merlin.Derive.Geofence do
     previous = World.get(state.out_path, :unknown)
 
     case read_point(state) do
-      :incoherent ->
+      {:incoherent, why} ->
         # HOLD. Not `:unknown` -- writing that would itself be an edge, and
         # `{:leaves, zone, :home}` fires on it just as readily as a real
         # departure would. The whole defect here is edges that describe
@@ -240,7 +240,10 @@ defmodule Merlin.Derive.Geofence do
         #
         # Debug, not info: this is the NORMAL path for the first writes of
         # every message, so at any louder level it would be pure noise.
-        Logger.debug(fn -> "#{state.id}: partial observation, holding" end)
+        # `why` is :window (components too far apart in time) or :observation
+        # (components from two different arrivals). A zone that has stopped
+        # moving is a diagnosable symptom only if this says which.
+        Logger.debug(fn -> "#{state.id}: partial observation (#{why}), holding" end)
 
         if Keyword.get(opts, :arm_recheck, false) and not state.recheck_armed? do
           Process.send_after(self(), :recheck, @recheck_ms)
@@ -323,15 +326,27 @@ defmodule Merlin.Derive.Geofence do
   # How far apart two components of one observation may be observed and still
   # be treated as describing the same moment.
   #
-  # The assumption, stated so it can be checked: one message's fact writes
-  # complete within this window, and two distinct observations are further
-  # apart than it. Both hold by orders of magnitude -- three consecutive calls
-  # to one writer doing ETS inserts take well under a millisecond, and a phone
-  # reports every thirty seconds.
+  # The assumption was written down here so that it could be checked: "one
+  # message's fact writes complete within this window, and two distinct
+  # observations are further apart than it". The first half holds. The SECOND
+  # HALF IS FALSE, and tier 9 found it with seed 6339 -- the same intruder
+  # latch re-arming, for the same reason, a second time.
   #
-  # Where it fails is two genuine observations less than 250ms apart, whose
-  # components could still be crossed. That is a duplicate message in practice,
-  # where the chimera equals the truth and nothing is harmed.
+  # The excuse offered for that case -- "a duplicate message in practice, where
+  # the chimera equals the truth and nothing is harmed" -- is true only when
+  # the two arrivals carry the SAME values. Two DIFFERENT fixes 200ms apart
+  # cross into a position matching neither. A phone flushing a queued backlog
+  # after regaining signal does exactly that, and so does anything stepping
+  # faster than a quarter-second.
+  #
+  # Every test of the window had slept longer than it before the second write,
+  # so all of them confirmed the fix and none probed its premise. That is the
+  # shape to watch for: an assumption stated honestly, and then only ever
+  # tested from the side that agrees with it.
+  #
+  # So the window is no longer the whole check. It is kept because it still
+  # guards components whose writer supplies no identity, but the question it
+  # was approximating is now asked directly. See one_observation?/1.
   @coherence_ms 250
 
   # A position is only usable if its components are present, fresh, accurate
@@ -350,10 +365,17 @@ defmodule Merlin.Derive.Geofence do
   # an arrival that did not happen, and it occurs on every single update -- it
   # is merely invisible when the chimera lands in the same zone as the truth.
   #
+  # It caught it TWICE. The first fix paired components by proximity in time,
+  # which is evidence that two values might belong together and never proof
+  # that they do; two genuine fixes inside the window crossed anyway. So the
+  # components now have to agree on WHICH ARRIVAL they were read from, which is
+  # the question proximity was standing in for. Both checks apply, so this is
+  # strictly stronger than the window alone and never weaker.
+  #
   # Contemporaneity is checkable because an unchanged write still refreshes
-  # `observed_at`. A device re-reporting an identical longitude therefore keeps
-  # the pair coherent, which is that decision paying for itself somewhere it
-  # was not designed for.
+  # `observed_at` -- and `observation` with it, for the same reason. A device
+  # re-reporting an identical longitude therefore keeps the pair coherent,
+  # which is that decision paying for itself somewhere it was not designed for.
   #
   # The trade-off, stated: a device that DECLARES an accuracy fact and then
   # stops sending it freezes its zone, because the fix can no longer be
@@ -364,28 +386,55 @@ defmodule Merlin.Derive.Geofence do
   # reports accuracy at all is unaffected, since there is no fact to be
   # incoherent with.
   defp read_point(state) do
-    with {:ok, lat, lat_at} <- fresh_value(state.lat_path, state.stale_after_ms),
-         {:ok, lon, lon_at} <- fresh_value(state.lon_path, state.stale_after_ms),
-         :ok <- coherent?([lat_at, lon_at | accuracy_observed_at(state)]),
+    accuracy = accuracy_fact(state)
+
+    with {:ok, lat, lat_at, lat_obs} <- fresh_value(state.lat_path, state.stale_after_ms),
+         {:ok, lon, lon_at, lon_obs} <- fresh_value(state.lon_path, state.stale_after_ms),
+         :ok <- coherent?([lat_at, lon_at | Enum.map(accuracy, & &1.observed_at)]),
+         :ok <- one_observation?([lat_obs, lon_obs | Enum.map(accuracy, & &1.observation)]),
          :ok <- accurate_enough(state) do
       # The older of the two components is when this fix was taken, and it is
       # what the certainty window is measured from.
       {{lat, lon}, min(lat_at, lon_at)}
     else
-      :incoherent -> :incoherent
+      {:incoherent, why} -> {:incoherent, why}
       _ -> :unknown
     end
   end
 
   defp coherent?(stamps) do
-    if Enum.max(stamps) - Enum.min(stamps) <= @coherence_ms, do: :ok, else: :incoherent
+    if Enum.max(stamps) - Enum.min(stamps) <= @coherence_ms,
+      do: :ok,
+      else: {:incoherent, :window}
   end
 
-  defp accuracy_observed_at(%{accuracy_path: nil}), do: []
+  # Did these components come from ONE arrival?
+  #
+  # `coherent?/1` asks whether they arrived close together. This asks the
+  # question that was actually meant, and can answer it exactly, because the
+  # ingress stamps every fact it writes from one payload with one id.
+  #
+  # `nil` means the writer was not an arrival at all -- a rule action, an
+  # operator setting a fact by hand, a snapshot restored from a previous VM.
+  # Those carry no identity to compare, so they fall through to the window
+  # exactly as before: a source that stamps nothing is no less safe than it
+  # was, and one that stamps is now safe at any spacing.
+  defp one_observation?(ids) do
+    case ids |> Enum.reject(&is_nil/1) |> Enum.uniq() do
+      [] -> :ok
+      [_one] -> :ok
+      _several -> {:incoherent, :observation}
+    end
+  end
 
-  defp accuracy_observed_at(state) do
+  # The accuracy fact as a list, so that "this geofence declares no accuracy
+  # path" and "nothing has been written to it yet" both drop out of the checks
+  # above instead of each needing its own nil case at every call site.
+  defp accuracy_fact(%{accuracy_path: nil}), do: []
+
+  defp accuracy_fact(state) do
     case World.fetch(state.accuracy_path) do
-      {:ok, %Fact{observed_at: at}} -> [at]
+      {:ok, %Fact{} = fact} -> [fact]
       :error -> []
     end
   end
@@ -410,7 +459,7 @@ defmodule Merlin.Derive.Geofence do
         cond do
           Fact.stale?(fact) -> :stale
           is_integer(stale_after_ms) and Fact.age(fact) > stale_after_ms -> :stale
-          true -> {:ok, value, fact.observed_at}
+          true -> {:ok, value, fact.observed_at, fact.observation}
         end
 
       _ ->

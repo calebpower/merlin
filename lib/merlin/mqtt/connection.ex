@@ -210,9 +210,17 @@ defmodule Merlin.MQTT.Connection do
   end
 
   defp dispatch(module, opts, topic, payload, captures, state) do
+    # One id for this payload, shared by every fact it writes.
+    #
+    # A message carrying a position becomes three separate fact writes, and
+    # between them the world holds a position that never existed. Timestamps
+    # cannot separate two arrivals that land close together; an id taken from
+    # the arrival itself can. See `Merlin.Derive.Geofence`.
+    observation = System.unique_integer([:monotonic, :positive])
+
     case module.handle_ingress(topic, payload, captures, opts) do
       {:ok, emissions} ->
-        Enum.each(emissions, &apply_emission(&1, module, captures, state))
+        Enum.each(emissions, &apply_emission(&1, module, captures, observation, state))
 
       {:error, reason} ->
         Logger.warning("#{inspect(module)} rejected #{topic}: #{inspect(reason)}")
@@ -230,11 +238,15 @@ defmodule Merlin.MQTT.Connection do
 
   # The captures come from the router, not from the adapter, so an adapter
   # cannot forget to pass them on and every source gets them for free.
-  defp apply_emission({:fact, path, value}, module, captures, _state) do
-    World.put(path, value, source: {:adapter, module}, captures: captures)
+  defp apply_emission({:fact, path, value}, module, captures, observation, _state) do
+    World.put(path, value,
+      source: {:adapter, module},
+      captures: captures,
+      observation: observation
+    )
   end
 
-  defp apply_emission({:event, path, payload}, module, captures, _state) do
+  defp apply_emission({:event, path, payload}, module, captures, _observation, _state) do
     World.emit(path, payload, source: {:adapter, module}, captures: captures)
   end
 
@@ -247,7 +259,13 @@ defmodule Merlin.MQTT.Connection do
   # few seconds, which is not a bug being tolerated -- it is the daemon saying
   # truthfully that it is not acting yet. `/healthz` and `bin/merlin rpc` both
   # answer throughout.
-  defp apply_emission({:publish, topic, payload, opts} = emission, module, _captures, state) do
+  defp apply_emission(
+         {:publish, topic, payload, opts} = emission,
+         module,
+         _captures,
+         _observation,
+         state
+       ) do
     if Merlin.Settle.settling?() and Merlin.Settle.suppresses?(emission) do
       Logger.info(
         "[settling #{Merlin.Settle.remaining_ms()}ms] held: publish #{topic} " <>
