@@ -182,9 +182,24 @@ defmodule Merlin.TUI.Buffer do
   # holds exactly one column, so a caller handing over a whole string gets its
   # first grapheme rather than a silently ragged row.
   defp safe(char) do
-    case String.graphemes(char) do
-      [] -> " "
-      [g | _] -> if control?(g) or combining?(g), do: @substitute, else: g
+    cond do
+      # Invalid encoding first, and before anything that inspects codepoints.
+      # A device is not obliged to send well-formed UTF-8, and String functions
+      # raise on bytes that are not -- so the check meant to defend against
+      # hostile input crashed ON hostile input. Found by tier 7 within seconds
+      # of pointing it here.
+      #
+      # Substituted rather than rendered: bytes that are not a character cannot
+      # be shown as one, and guessing an encoding is how mojibake becomes
+      # permanent.
+      not String.valid?(char) ->
+        @substitute
+
+      true ->
+        case String.graphemes(char) do
+          [] -> " "
+          [g | _] -> if control?(g) or combining?(g), do: @substitute, else: g
+        end
     end
   end
 

@@ -119,6 +119,17 @@ defmodule Merlin.TUIBufferTest do
       assert Buffer.row(b, 0) == "é    "
     end
 
+    test "invalid UTF-8 is substituted, not raised on" do
+      # The sanitiser inspects codepoints, and String functions raise on bytes
+      # that are not a character -- so the guard against hostile input crashed
+      # on hostile input. A device is under no obligation to send well-formed
+      # UTF-8, and tier 7 found this within seconds of being pointed here.
+      b = Buffer.new(5, 1) |> Buffer.write(0, 0, <<0xBC, 0xBD, ?a>>)
+
+      assert String.length(Buffer.row(b, 0)) == 5
+      assert Buffer.row(b, 0) =~ "·"
+    end
+
     test "substitution, not deletion" do
       # A name that silently loses a character is a name you will misread.
       b = Buffer.new(5, 1) |> Buffer.write(0, 0, "a\tb")
