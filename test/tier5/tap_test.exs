@@ -43,8 +43,17 @@ defmodule Merlin.TapTest do
   # arrives together, not about how fast.
   defp attach!(opts \\ []) do
     {:ok, %{pid: pid}} = Tap.attach(self(), Keyword.put_new(opts, :flush_ms, 200))
-    on_exit(fn -> if Process.alive?(pid), do: Tap.detach(pid) end)
+    on_exit(fn -> stop(pid) end)
     pid
+  end
+
+  # A tap attached to the TEST process dies when the test does -- its monitor
+  # fires -- so cleanup races the thing it is cleaning up. An already-gone tap
+  # is the correct outcome here, not an error.
+  defp stop(pid) do
+    Tap.detach(pid)
+  catch
+    :exit, _ -> :ok
   end
 
   # --- the handshake --------------------------------------------------------
@@ -52,7 +61,7 @@ defmodule Merlin.TapTest do
   describe "attach" do
     test "returns the daemon's version, so a client can refuse a mismatch" do
       {:ok, %{pid: pid, version: version}} = Tap.attach(self())
-      on_exit(fn -> if Process.alive?(pid), do: Tap.detach(pid) end)
+      on_exit(fn -> stop(pid) end)
 
       assert is_pid(pid)
       assert version == to_string(Application.spec(:merlin, :vsn))
@@ -65,7 +74,7 @@ defmodule Merlin.TapTest do
 
       mine = attach!()
       {:ok, %{pid: theirs}} = Tap.attach(other, flush_ms: 200)
-      on_exit(fn -> if Process.alive?(theirs), do: Tap.detach(theirs) end)
+      on_exit(fn -> stop(theirs) end)
 
       refute mine == theirs
 
