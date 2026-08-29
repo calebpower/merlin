@@ -39,6 +39,7 @@ defmodule Merlin.TUI.Session do
           | {:commit, binary(), keyword()}
           | {:cancel, binary()}
           | {:evaluate, binary()}
+          | {:explain, atom(), Merlin.Path.t()}
 
   @type mode :: :normal | :command | :confirm
 
@@ -56,6 +57,7 @@ defmodule Merlin.TUI.Session do
         }
 
   defstruct pane: :facts,
+            explanation: nil,
             selected: 0,
             scroll: 0,
             filter: nil,
@@ -102,6 +104,26 @@ defmodule Merlin.TUI.Session do
   defp normal(s, :end, scene), do: {move_to(s, count(s, scene) - 1, scene), []}
   defp normal(s, {:char, "g"}, scene), do: {move_to(s, 0, scene), []}
   defp normal(s, {:char, "G"}, scene), do: {move_to(s, count(s, scene) - 1, scene), []}
+  # The question the rules pane exists to answer. Asks the daemon, because
+  # only the daemon can: a guard needs the live world, and a :changes_in
+  # trigger needs the loaded groups.
+  defp normal(%{pane: :rules} = s, {:char, "?"}, scene) do
+    case Enum.at(scene.rules, s.selected) do
+      nil ->
+        {s, []}
+
+      rule ->
+        # Ask about the fact the rule itself watches. "What would this rule do
+        # if the thing it is listening for changed" is the question; picking an
+        # unrelated path would produce a confident answer to a question nobody
+        # asked, which is worse than no answer.
+        case explain_path(rule, scene) do
+          nil -> {say(s, "#{rule.id} watches nothing that can be asked about"), []}
+          path -> {s, [{:explain, rule.id, path}]}
+        end
+    end
+  end
+
   defp normal(s, :escape, _scene), do: {%{s | filter: nil, status: nil}, []}
   defp normal(s, _key, _scene), do: {s, []}
 
@@ -187,10 +209,44 @@ defmodule Merlin.TUI.Session do
   @spec resize(t(), pos_integer(), pos_integer()) :: t()
   def resize(%__MODULE__{} = s, w, h), do: %{s | size: {w, h}}
 
+  @doc "Record an answer from the daemon about the selected rule."
+  @spec explained(t(), term()) :: t()
+  def explained(%__MODULE__{} = s, explanation), do: %{s | explanation: explanation}
+
   @doc "The session as the views want it: a plain map, so a view needs no struct."
   @spec to_view(t()) :: map()
   def to_view(%__MODULE__{} = s) do
-    %{filter: s.filter, selected: s.selected, scroll: s.scroll, pane: s.pane}
+    %{
+      filter: s.filter,
+      selected: s.selected,
+      scroll: s.scroll,
+      pane: s.pane,
+      explanation: s.explanation
+    }
+  end
+
+  # A rule's own first watch, or the first member of the first group it
+  # triggers on -- which is where a {:changes_in, group} rule's facts live.
+  #
+  # Groups come from the SCENE, not from Merlin.Groups. The first version
+  # called Merlin.Groups.members/1 and the boundary test would have caught it:
+  # on a client that reads an empty config and answers [], so this would have
+  # reported "watches nothing that can be asked about" for every group-triggered
+  # rule -- confidently, and wrongly. Exactly what the boundary exists to stop,
+  # violated within minutes of writing it.
+  defp explain_path(rule, scene) do
+    cond do
+      rule.watches != [] -> List.first(rule.watches)
+      rule.watch_groups != [] -> group_member(scene, List.first(rule.watch_groups))
+      true -> nil
+    end
+  end
+
+  defp group_member(scene, group) do
+    scene.groups
+    |> Map.get(group, %{})
+    |> Map.get(:members, [])
+    |> List.first()
   end
 
   # --- selection ------------------------------------------------------------
@@ -201,7 +257,15 @@ defmodule Merlin.TUI.Session do
     last = max(count(s, scene) - 1, 0)
     selected = index |> max(0) |> min(last)
 
-    %{s | selected: selected, scroll: View.Facts.scroll_for(selected, s.scroll, rows(s))}
+    %{
+      s
+      | selected: selected,
+        scroll: View.Facts.scroll_for(selected, s.scroll, rows(s)),
+        # Cleared on every move. An explanation shown beneath a row it does not
+        # describe is a frame that is well-formed, correctly laid out and
+        # wrong -- the one defect an operator cannot catch.
+        explanation: nil
+    }
   end
 
   # How many rows the body has, which is what a page-worth means and what the

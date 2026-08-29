@@ -200,6 +200,16 @@ defmodule Merlin.TUI do
     %{state | session: Session.say(state.session, "cancelled")}
   end
 
+  defp act({:explain, rule_id, path}, state) do
+    case Remote.explain(state.node, rule_id, path) do
+      {:ok, explanation} ->
+        %{state | session: Session.explained(state.session, explanation)}
+
+      {:error, reason} ->
+        %{state | session: Session.say(state.session, "cannot explain: #{inspect(reason)}")}
+    end
+  end
+
   defp act({:evaluate, source}, state) do
     message =
       case Remote.evaluate(state.node, source) do

@@ -28,8 +28,55 @@ defmodule Merlin.TUI.View.Rules do
     Buffer.new(w, h)
     |> Buffer.write(0, 0, "#{length(rules)} rules", [:bright])
     |> Buffer.write(0, 1, columns(w), [:faint])
-    |> body(scene, rules, selected, scroll, rows, w)
+    |> body(scene, rules, selected, scroll, rows - 1, w)
+    |> explanation(session[:explanation], w, h)
   end
+
+  @doc """
+  The line at the foot of the pane: why the selected rule would or would not
+  act, as the daemon answered.
+
+  The pane above shows a guard's TEXT. This shows what that text evaluates to
+  now, which is the question actually being asked -- and the four answers are
+  genuinely different: the trigger did not match, the guard was false, the
+  guard was :unknown because something it reads is stale, or it passed and an
+  action's value could not be resolved. Before this they were one silence.
+  """
+  @spec explanation(Buffer.t(), term(), non_neg_integer(), non_neg_integer()) :: Buffer.t()
+  def explanation(buffer, nil, w, h) do
+    Buffer.write(buffer, 0, h - 1, Buffer.fit("? explains the selected rule", w), [:faint])
+  end
+
+  def explanation(buffer, explanation, w, h) do
+    {text, style} = describe(explanation)
+    Buffer.write(buffer, 0, h - 1, Buffer.fit(text, w), style)
+  end
+
+  defp describe(%{triggered?: false, id: id}),
+    do: {"#{id}: this fact does not fire it -- check its triggers", [:faint]}
+
+  defp describe(%{fires?: true, id: id, effects: effects}),
+    do: {"#{id}: WOULD FIRE -- #{Enum.map_join(effects, "; ", &Merlin.Effects.describe/1)}",
+         [:green]}
+
+  defp describe(%{guard: {:refused, :unknown}, id: id, guard_source: source}),
+    do: {"#{id}: guard is :unknown -- something it reads is stale or absent#{src(source)}",
+         [:yellow]}
+
+  defp describe(%{guard: {:refused, false}, id: id, guard_source: source}),
+    do: {"#{id}: guard is false#{src(source)}", []}
+
+  defp describe(%{guard: {:refused, other}, id: id}),
+    do: {"#{id}: guard evaluated to #{inspect(other)}, neither true nor false", [:red]}
+
+  defp describe(%{skipped: reason, id: id}) when not is_nil(reason),
+    do: {"#{id}: guard passed, but an action could not be resolved: #{inspect(reason)}",
+         [:yellow]}
+
+  defp describe(%{id: id}), do: {"#{id}: nothing to report", [:faint]}
+
+  defp src(nil), do: ""
+  defp src(source), do: " -- #{source}"
 
   defp columns(w) do
     Enum.join(
