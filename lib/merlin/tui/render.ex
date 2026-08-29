@@ -30,7 +30,10 @@ defmodule Merlin.TUI.Render do
   alias Merlin.TUI.Buffer
 
   @typedoc "One drawing instruction. `emit/1` turns a list of these into bytes."
-  @type op :: {:move, non_neg_integer(), non_neg_integer()} | {:style, [atom()]} | {:text, binary()}
+  @type op ::
+          {:move, non_neg_integer(), non_neg_integer()}
+          | {:style, [atom()]}
+          | {:text, binary()}
 
   # The attributes a view may ask for. Anything else is ignored rather than
   # reached for dynamically.

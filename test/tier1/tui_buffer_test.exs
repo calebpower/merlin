@@ -101,6 +101,24 @@ defmodule Merlin.TUIBufferTest do
       end
     end
 
+    test "a lone combining mark cannot merge with its neighbour" do
+      # Found by the shape property, not by reading: a combining mark with no
+      # base attaches to the cell on its LEFT when the row is joined, so the
+      # row renders one grapheme short and everything after it shifts.
+      b = Buffer.new(5, 1) |> Buffer.write(1, 0, "\u1DF8")
+
+      assert String.length(Buffer.row(b, 0)) == 5
+      assert Buffer.row(b, 0) == " ·   "
+    end
+
+    test "but an accented character is left alone" do
+      # The control: it has a base of its own and occupies one column honestly.
+      b = Buffer.new(5, 1) |> Buffer.write(0, 0, "é")
+
+      assert String.length(Buffer.row(b, 0)) == 5
+      assert Buffer.row(b, 0) == "é    "
+    end
+
     test "substitution, not deletion" do
       # A name that silently loses a character is a name you will misread.
       b = Buffer.new(5, 1) |> Buffer.write(0, 0, "a\tb")

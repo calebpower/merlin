@@ -121,6 +121,54 @@ defmodule Merlin.Tap do
     end
   end
 
+  @doc """
+  The whole house, as one value, built where the world actually is.
+
+  The client cannot do this itself: it loads every module but starts no
+  application, so `Merlin.World` has no table and `Merlin.Config` is empty.
+  A client-built scene would report a house with nothing in it and a banner
+  reading LIVE while the daemon was dry.
+  """
+  @spec scene() :: Merlin.TUI.Scene.t()
+  def scene do
+    machines = Enum.filter(Merlin.Config.rules(), &match?(%Merlin.Machine{}, &1))
+
+    %Merlin.TUI.Scene{
+      facts: Merlin.World.dump([]),
+      rules: Merlin.Config.rules(),
+      states: Map.new(machines, fn m -> {m.id, machine_state(m)} end),
+      groups: Merlin.Config.groups(),
+      dry_run?: Merlin.Config.dry_run?(),
+      settling_ms: Merlin.Settle.remaining_ms(),
+      connected?: Merlin.MQTT.Connection.connected?(),
+      version: version(),
+      now: System.monotonic_time(:millisecond)
+    }
+  end
+
+  @doc """
+  Evaluate a merlin expression against the live world.
+
+  The same bounded evaluator a guard uses, through the same environment, so
+  what the operator sees is what a rule would see. Any other answer would make
+  this a debugging tool that disagrees with the thing being debugged.
+  """
+  @spec evaluate(binary()) :: {:ok, term()} | {:error, term()}
+  def evaluate(source) when is_binary(source) do
+    with {:ok, expr} <- Merlin.Expr.compile(source) do
+      {:ok, Merlin.Expr.eval(expr, Merlin.Rules.Env.build(%{}))}
+    end
+  end
+
+  # A machine with no process reports its declared initial state rather than
+  # nothing. Honest -- it is what the machine would be in -- and better than a
+  # blank column that reads as "no idea".
+  defp machine_state(m) do
+    Merlin.Machine.Server.state(m.id)
+  catch
+    :exit, _ -> m.initial
+  end
+
   @doc "How many items may be pending before the oldest are dropped."
   @spec max_pending() :: pos_integer()
   def max_pending, do: @max_pending
