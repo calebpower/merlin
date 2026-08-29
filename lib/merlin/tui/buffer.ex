@@ -36,7 +36,11 @@ defmodule Merlin.TUI.Buffer do
 
   @type cell :: {binary(), style()}
 
-  @type t :: %__MODULE__{w: pos_integer(), h: pos_integer(), cells: %{{integer(), integer()} => cell()}}
+  @type t :: %__MODULE__{
+          w: pos_integer(),
+          h: pos_integer(),
+          cells: %{{integer(), integer()} => cell()}
+        }
 
   @enforce_keys [:w, :h, :cells]
   defstruct [:w, :h, :cells]
@@ -180,9 +184,22 @@ defmodule Merlin.TUI.Buffer do
   defp safe(char) do
     case String.graphemes(char) do
       [] -> " "
-      [g | _] -> if control?(g), do: @substitute, else: g
+      [g | _] -> if control?(g) or combining?(g), do: @substitute, else: g
     end
   end
+
+  # A combining mark with no base character. Stored in a cell it attaches
+  # itself to whatever is in the cell to its LEFT when the row is joined, so a
+  # 21-cell row renders as 20 graphemes and everything after it shifts.
+  #
+  # The grid's whole premise is one cell, one column, and Unicode does not
+  # agree unless it is made to. Detected behaviourally rather than by Unicode
+  # category, because the behaviour IS the hazard: if appending this to a space
+  # yields a single grapheme, it will merge with its neighbour on screen.
+  #
+  # A normal accented character is unaffected: "é" appended to a space is two
+  # graphemes, because it has a base of its own.
+  defp combining?(grapheme), do: String.length(" " <> grapheme) == 1
 
   # ANY codepoint in the grapheme, not just a lone one. A grapheme can be
   # several codepoints -- a base character and its combining marks -- and the
