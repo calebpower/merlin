@@ -83,20 +83,45 @@ defmodule Merlin.TUI.Buffer do
       b
     else
       text
+      |> printable()
       |> String.graphemes()
       |> Enum.with_index(x)
       |> Enum.reduce(b, fn {g, at}, acc -> put(acc, at, y, g, style) end)
     end
   end
 
+  @doc """
+  Make a binary safe to measure and to display.
+
+  Every entrance to the grid goes through here. That is the point: the first
+  version sanitised at the cell, in `put/5`, and `fit/2` crashed before text
+  ever reached a cell -- because it calls `String.graphemes/1`, which raises on
+  bytes that are not valid UTF-8. Hardening one door at a time leaves the
+  others open, and tier 7 walked through the second one within a run of the
+  first being closed.
+
+  Invalid bytes are replaced individually, so a valid run either side of a bad
+  byte survives and only the offending byte becomes a mark.
+  """
+  @spec printable(binary()) :: binary()
+  def printable(text) when is_binary(text) do
+    text |> valid_utf8() |> String.graphemes() |> Enum.map_join(&safe/1)
+  end
+
+  # Keep what decodes, substitute what does not, byte by byte. Total by
+  # construction: every clause consumes at least one byte.
+  defp valid_utf8(<<>>), do: ""
+  defp valid_utf8(<<c::utf8, rest::binary>>), do: <<c::utf8>> <> valid_utf8(rest)
+  defp valid_utf8(<<_bad, rest::binary>>), do: @substitute <> valid_utf8(rest)
+
   @doc "`text` truncated to `width` graphemes, padded with spaces to exactly that."
   @spec fit(binary(), non_neg_integer()) :: binary()
   def fit(text, width) when is_binary(text) and width >= 0 do
-    graphemes = String.graphemes(text)
+    graphemes = text |> printable() |> String.graphemes()
 
     case length(graphemes) do
       n when n >= width -> graphemes |> Enum.take(width) |> Enum.join()
-      n -> text <> String.duplicate(" ", width - n)
+      n -> Enum.join(graphemes) <> String.duplicate(" ", width - n)
     end
   end
 
@@ -181,7 +206,7 @@ defmodule Merlin.TUI.Buffer do
   # One grapheme in, one grapheme out, and never a control character. A cell
   # holds exactly one column, so a caller handing over a whole string gets its
   # first grapheme rather than a silently ragged row.
-  defp safe(char) do
+  defp safe(char) when is_binary(char) do
     cond do
       # Invalid encoding first, and before anything that inspects codepoints.
       # A device is not obliged to send well-formed UTF-8, and String functions

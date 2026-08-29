@@ -303,6 +303,38 @@ defmodule Merlin.SimulatedHouseTest do
       assert msg =~ "no :exterior_doors members"
     end
 
+    test "tui_never_lies is quiet when the frame tells the truth" do
+      # The control. Without it, an invariant that reported nothing whatever
+      # would satisfy the two cases below and look rigorous.
+      honest = [entry(1, facts: %{[:door, "front", :contact] => :open})]
+
+      assert Invariants.tui_never_lies(honest) == []
+    end
+
+    test "tui_never_lies catches a row the frame never drew" do
+      # The shape a scroll bug takes: the fact is real, the screen looks fine,
+      # and the row simply is not there. An operator reads a house with one
+      # fewer door than it has.
+      timeline = [entry(1, facts: %{[:door, "front", :contact] => :open})]
+
+      dropped = fn _facts -> "" end
+
+      assert [message] = Invariants.tui_never_lies(timeline, dropped)
+      assert message =~ "door.front.contact"
+    end
+
+    test "tui_never_lies catches a value formatted from somewhere else" do
+      # The defect an operator cannot catch: well-formed, correctly laid out,
+      # and wrong. It does not look like a fault -- it looks like a house
+      # behaving oddly, and they go and investigate the house.
+      timeline = [entry(1, facts: %{[:door, "front", :contact] => :open})]
+
+      lying = fn _facts -> "door.front.contact  :closed" end
+
+      assert [message] = Invariants.tui_never_lies(timeline, lying)
+      assert message =~ ":open", "the complaint must name the value that was true"
+    end
+
     # The meta-assertion. If someone adds an invariant and no self-test, this
     # notices -- otherwise the suite grows checks nobody has shown can fail.
     test "every invariant has a self-test that makes it fire" do
@@ -313,6 +345,7 @@ defmodule Merlin.SimulatedHouseTest do
           :latch_never_fires_at_home,
           :latch_never_fires_on_a_lost_phone,
           :latch_only_fires_on_an_exterior_door,
+          :tui_never_lies,
           :latch_stays_fired_until_home,
           :nothing_published_while_settling,
           :lamps_never_commanded_in_daylight,

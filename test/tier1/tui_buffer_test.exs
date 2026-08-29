@@ -130,6 +130,20 @@ defmodule Merlin.TUIBufferTest do
       assert Buffer.row(b, 0) =~ "·"
     end
 
+    test "fit/2 survives invalid UTF-8, because it is also a door" do
+      # The first fix hardened put/5 and fit/2 still crashed -- it calls
+      # String.graphemes/1 before any text reaches a cell. Tier 7 found the
+      # second door within one run of the first being shut.
+      assert Buffer.fit(<<0xDF, 0xFF, ?a>>, 5) |> String.length() == 5
+    end
+
+    test "a valid run either side of a bad byte survives" do
+      # Replaced byte by byte rather than discarding the string: a device name
+      # with one corrupt byte is still mostly readable, and mostly readable is
+      # what an operator needs at 3am.
+      assert Buffer.printable(<<?a, 0xFF, ?b>>) == "a·b"
+    end
+
     test "substitution, not deletion" do
       # A name that silently loses a character is a name you will misread.
       b = Buffer.new(5, 1) |> Buffer.write(0, 0, "a\tb")
