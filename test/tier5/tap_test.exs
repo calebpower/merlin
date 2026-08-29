@@ -228,8 +228,18 @@ defmodule Merlin.TapTest do
 
       # The monitor is taken before subscribing, so it fires immediately and
       # this exits without ever having joined.
+      #
+      # The exit reason is deliberately not pinned to :normal. The tap can be
+      # gone BEFORE this line runs -- it is that quick about it -- in which
+      # case monitoring an already-dead pid yields :noproc instead. Both mean
+      # the same thing, and asserting only one made this pass on most timings
+      # and fail on the rest.
       tap_ref = Process.monitor(tap)
-      assert_receive {:DOWN, ^tap_ref, :process, ^tap, :normal}, 1_000
+      assert_receive {:DOWN, ^tap_ref, :process, ^tap, reason}, 1_000
+
+      assert reason in [:normal, :noproc],
+             "however it goes, a tap must not survive a client that was already gone"
+
       refute tap in Merlin.Effects.Tap.subscribers()
     end
   end
