@@ -64,6 +64,9 @@ defmodule Merlin.World.Writer do
     * `:stale_after` -- milliseconds after which the fact counts as stale
     * `:captures` -- named topic wildcards of the message this came from,
       carried onto the change so a rule can read `trigger.room`
+    * `:observation` -- which arrival this value was read from. Every fact
+      written from one payload shares one, so a deriver can tell the components
+      of a single observation from the components of two. See `Merlin.Fact`.
   """
   @spec put(Path.t(), term(), keyword()) ::
           {:changed, term(), term()} | :unchanged | {:dropped, :max_depth}
@@ -173,7 +176,12 @@ defmodule Merlin.World.Writer do
       observed_at: at,
       source: source,
       seq: seq,
-      stale_after: Keyword.get(opts, :stale_after, previous && previous.stale_after)
+      stale_after: Keyword.get(opts, :stale_after, previous && previous.stale_after),
+      # Refreshed on every write, INCLUDING an unchanged one, for exactly the
+      # reason observed_at is. A device re-reporting an identical longitude has
+      # genuinely reported it as part of this arrival, and a deriver asking
+      # "did these components come from one observation" must get yes.
+      observation: Keyword.get(opts, :observation)
     }
 
     :ets.insert(table, {path, fact})

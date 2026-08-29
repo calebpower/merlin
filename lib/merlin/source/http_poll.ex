@@ -266,12 +266,18 @@ defmodule Merlin.Source.HttpPoll do
   defp write_facts(state, body) do
     root = if state.root, do: Map.get(body, state.root, body), else: body
 
+    # One response is one observation, however many facts it yields -- the same
+    # reason the MQTT ingress mints one per payload. A vehicle's lat, lon and
+    # accuracy all come from here.
+    observation = System.unique_integer([:monotonic, :positive])
+
     Enum.count(state.facts, fn spec ->
       case Codec.dig(root, Map.fetch!(spec, :from), Map.get(spec, :codec)) do
         {:ok, value} ->
           World.put(spec.path, value,
             source: {:poll, state.id},
-            stale_after: state.stale_after_ms
+            stale_after: state.stale_after_ms,
+            observation: observation
           )
 
           true

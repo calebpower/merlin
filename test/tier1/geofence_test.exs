@@ -60,14 +60,20 @@ defmodule Merlin.GeofenceProcessTest do
     pid
   end
 
-  # A whole observation, the way one message arrives: several writes, close
-  # together in time.
-  defp observe(paths, {lat, lon}, accuracy) do
-    World.put(paths.lat, lat)
-    World.put(paths.lon, lon)
-    World.put(paths.accuracy, accuracy)
+  # A whole observation, the way one message arrives: several writes carrying
+  # one observation id, because they came off one payload.
+  defp observe(paths, point, accuracy), do: observe(paths, point, accuracy, fix())
+
+  defp observe(paths, {lat, lon}, accuracy, obs) do
+    World.put(paths.lat, lat, observation: obs)
+    World.put(paths.lon, lon, observation: obs)
+    World.put(paths.accuracy, accuracy, observation: obs)
     settle()
   end
+
+  # One message's identity. `Merlin.MQTT.Connection` mints one of these per
+  # ingested payload; a test that models a message mints its own.
+  defp fix, do: System.unique_integer([:monotonic, :positive])
 
   # Long enough to cover the geofence's deferred recheck, which is armed
   # whenever an observation arrives in pieces -- which is every observation.
@@ -206,6 +212,55 @@ defmodule Merlin.GeofenceProcessTest do
 
       assert zone(paths) == :home,
              "an incomplete update cleared the zone, which is an edge rules will act on"
+    end
+
+    # THE ASSUMPTION, PROBED.
+    #
+    # Every test above separates its two observations with a sleep longer than
+    # the coherence window, so all of them confirm the fix while taking its
+    # premise for granted. The premise is written down in the geofence: "two
+    # distinct observations are further apart than it". It is not true, and
+    # nothing here was asking.
+    #
+    # A phone regaining signal flushes a queue, and the simulated house steps
+    # every ~80ms. Two DIFFERENT fixes ~200ms apart sit inside the window, so
+    # their components cross and the chimera is NOT the truth -- it is home's
+    # coordinates carrying the previous fix's accuracy, which is precisely the
+    # defect the window was added to prevent. Proximity in time is evidence
+    # that two values MIGHT belong together; it is never proof that they do.
+    #
+    # Tier 9 found it a second time, with seed 6339, as the intruder latch
+    # re-arming while the phone was at :unknown -- an alert for a real
+    # intrusion silently forgiven by a phone that merely might have been home.
+    #
+    # The interleaving is pinned rather than raced: the geofence sees the
+    # chimera only if it is scheduled between the coordinate writes and the
+    # accuracy write, which is why tier 9 failed only intermittently. Settling
+    # in the middle makes the same defect deterministic.
+    test "two observations closer together than the window are not crossed", %{
+      id: id,
+      paths: paths
+    } do
+      start_fence(id, paths)
+
+      observe(paths, @elsewhere, 30)
+      assert zone(paths) == :away
+
+      # NO sleep: this is a genuinely new fix arriving well inside the window.
+      arrival = fix()
+      World.put(paths.lat, elem(@home, 0), observation: arrival)
+      World.put(paths.lon, elem(@home, 1), observation: arrival)
+      settle()
+
+      refute zone(paths) == :home,
+             "home's coordinates were paired with the previous fix's accuracy " <>
+               "because the two fixes arrived close together in time"
+
+      # And this fix's own accuracy, once it lands, is the one that decides.
+      World.put(paths.accuracy, 120, observation: arrival)
+      settle()
+
+      assert zone(paths) == :unknown
     end
 
     test "the components realigning resolves normally", %{id: id, paths: paths} do
