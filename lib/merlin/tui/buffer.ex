@@ -184,7 +184,16 @@ defmodule Merlin.TUI.Buffer do
     end
   end
 
-  defp control?(<<c::utf8>>) when c < 0x20 or c == 0x7F, do: true
-  defp control?(<<c::utf8>>) when c >= 0x80 and c <= 0x9F, do: true
-  defp control?(_), do: false
+  # ANY codepoint in the grapheme, not just a lone one. A grapheme can be
+  # several codepoints -- a base character and its combining marks -- and the
+  # first version matched only the single-codepoint form, so an escape carrying
+  # a combining mark would have been waved through by the very check that
+  # exists to stop it. A sanitiser with an exception is not a sanitiser.
+  defp control?(grapheme) do
+    grapheme
+    |> String.to_charlist()
+    |> Enum.any?(fn c ->
+      c < 0x20 or c == 0x7F or (c >= 0x80 and c <= 0x9F)
+    end)
+  end
 end

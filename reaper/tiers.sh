@@ -103,7 +103,11 @@ export MIX_ENV=test
 
 tier 1 "pure unit" mix test --only tier1 --warnings-as-errors
 
-skip 2 "component conformance" "deferred to M9; no rendered markup exists yet"
+# Tier 2 is BUILT as of the TUI. The reason it was skipped -- "no rendered
+# markup exists yet" -- stopped being true the moment a view produced a
+# Merlin.TUI.Buffer, which is a deterministic character grid and a better
+# conformance surface than HTML: no cascade, no layout engine.
+tier 2 "component conformance" mix test --only tier2 --warnings-as-errors
 tier 3 "source-as-data" mix test --only tier3 --warnings-as-errors
 tier 4 "server contract" mix test --only tier4 --warnings-as-errors
 
@@ -130,7 +134,10 @@ fi
 
 tier 9 "simulated house" mix test --only tier9 --warnings-as-errors
 
-skip 10 "live browser audit" "deferred to M9"
+# Not "deferred to M9". M9's dashboard is not what happened -- the operator
+# interface is a TUI, and a browser audit has nothing to look at. Leaving the
+# old reason would have been a lie by omission the moment tier 2 turned on.
+skip 10 "live browser audit" "not applicable -- no web UI; the operator interface is a TUI, covered by tier 2"
 skip 11 "human evidence"     "not applicable -- single maintainer, no first-timer to observe"
 
 # ---------------------------------------------------------------------------
