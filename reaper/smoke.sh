@@ -392,6 +392,23 @@ if LC_ALL=C grep -q "$(printf '\033')" "$frame_out"; then
     die "--once emitted escape sequences"
 fi
 
+# Every pane, not just the default. The default was the ONE that worked when
+# --pane was broken: it is the Session struct's default and therefore the only
+# atom that already existed in a client VM. Exercising one pane proved the
+# least.
+for pane in facts rules stream devices; do
+    if ! "$TUIBIN" --once --pane "$pane" --cols 80 --rows 10 \
+            > "$REAPER_OUT/smoke-tui-$pane.txt" 2>&1; then
+        cat "$REAPER_OUT/smoke-tui-$pane.txt"
+        die "merlin --once --pane $pane failed"
+    fi
+
+    awk -v p="$pane" 'length != 80 { print "pane " p " line " NR " is " length; bad=1 }
+         END { exit bad ? 1 : 0 }' "$REAPER_OUT/smoke-tui-$pane.txt" \
+        || die "the $pane pane is not rectangular"
+done
+say "all four panes rendered"
+
 say "merlin --help"
 "$TUIBIN" --help > "$REAPER_OUT/smoke-tui-help.txt" 2>&1     || die "merlin --help failed"
 grep -q 'override dry run' "$REAPER_OUT/smoke-tui-help.txt"     || die "help does not mention the dry-run override"

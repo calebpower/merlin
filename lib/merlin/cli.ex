@@ -114,10 +114,19 @@ defmodule Merlin.CLI do
   defp put_pane(opts, nil), do: opts
 
   defp put_pane(opts, pane) do
-    if pane in ~w(facts rules stream devices) do
-      Keyword.put(opts, :pane, String.to_existing_atom(pane))
-    else
-      die("no pane #{inspect(pane)}. Try: facts, rules, stream, devices")
+    # Matched against Merlin.TUI.Session.panes/0 rather than converted.
+    #
+    # String.to_existing_atom/1 was wrong here and only failed once deployed: a
+    # client boots with `eval`, which loads modules LAZILY, so :rules and
+    # :devices did not exist yet in a VM that had not touched the view modules.
+    # `--pane facts` worked purely because it is the Session struct's default.
+    #
+    # Comparing to_string/1 of the real list has neither problem: it forces the
+    # module to load, it cannot create an atom, and the list of panes has one
+    # definition instead of two that must agree.
+    case Enum.find(Merlin.TUI.Session.panes(), &(to_string(&1) == pane)) do
+      nil -> die("no pane #{inspect(pane)}. Try: facts, rules, stream, devices")
+      found -> Keyword.put(opts, :pane, found)
     end
   end
 
