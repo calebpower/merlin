@@ -19,6 +19,19 @@ set -eu
 merlin_export_caches
 
 LEDGER="$REAPER_OUT/tiers.tsv"
+
+# Last run's artifacts, removed before this one writes any.
+#
+# $REAPER_OUT is not cleared between runs and is rsynced back whole, so a
+# FAILED-tier-1.log from an earlier run arrives beside a current ledger saying
+# tier 1 passed -- and reads exactly like a present failure. That has now
+# misled a reader twice. The durable copy of a failure is the archive under
+# $REAPER_STATE/failures, which is keyed by seed and timestamp and is not
+# touched here.
+before=$(ls "$REAPER_OUT" 2>/dev/null | grep -c FAILED || true)
+rm -f "$REAPER_OUT"/FAILED-* "$REAPER_OUT"/tier-*.log "$LEDGER"
+after=$(ls "$REAPER_OUT" 2>/dev/null | grep -c FAILED || true)
+printf '==> cleared %s stale failure log(s) from %s; %s remain\n' "$before" "$REAPER_OUT" "$after"
 : > "$LEDGER"
 failed=0
 
@@ -72,7 +85,12 @@ tier() {
 
         # Keep the evidence somewhere the next run will not delete.
         #
-        # build.sh clears $REAPER_OUT before every build, so a failing tier's
+        # NOT because build.sh clears $REAPER_OUT -- it does not, it removes
+        # only tiers.tsv (build.sh:92). That claim was written here and was
+        # false, and a stale FAILED-tier-1.log from an earlier run has twice
+        # been read as a present failure. The clearing at the top of this file
+        # is what makes it true; this comment is what stops it being believed
+        # again without it. So a failing tier's
         # log survived exactly until the next run. Tier 9 shrinks a failing
         # trace over several minutes and then wrote it into a file with a
         # lifetime of one loop -- the expensive work done and the answer thrown
