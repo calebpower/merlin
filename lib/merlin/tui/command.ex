@@ -100,6 +100,10 @@ defmodule Merlin.TUI.Command do
       ["filter", text] -> {:view, {:filter, text}}
       ["filter"] -> {:view, :clear_filter}
       ["pane", name] -> pane(name)
+      # Was falling through to unknown/1 and answering `no command "pane"`,
+      # which is not true and sends you looking for the right word for a word
+      # that was already right.
+      ["pane"] -> {:error, "pane <name>. Try: " <> Enum.join(Map.keys(@panes), ", ")}
       [word] -> unknown(word)
       [word | _] -> unknown(word)
     end
@@ -189,5 +193,92 @@ defmodule Merlin.TUI.Command do
       {"help", "this"},
       {"quit", "leave, restoring the terminal"}
     ]
+  end
+
+  @doc """
+  The verbs, taken from `help/0` rather than listed again.
+
+  A second list would be a second thing to forget: a command added to `help/0`
+  and not here would be documented and uncompletable, and one added here and
+  not there would complete to something the parser rejects.
+  """
+  @spec verbs() :: [binary()]
+  def verbs, do: Enum.map(help(), fn {form, _does} -> form |> String.split(" ") |> hd() end)
+
+  @doc """
+  Complete the word currently being typed.
+
+  Returns `{input, candidates}`. One match completes and adds a space; several
+  advance as far as they agree and hand back the list so the caller can show
+  it; none leaves the line untouched.
+
+  Completion is a pure function of the line and the scene, which is what makes
+  it testable without a terminal or a daemon -- and it is why the candidates
+  come from the SCENE. The client has every module loaded and no daemon state,
+  so asking `Merlin.Groups` here would offer an empty list of groups on every
+  machine except the one nobody runs this on.
+  """
+  @spec complete(binary(), Merlin.TUI.Scene.t()) :: {binary(), [binary()]}
+  def complete(input, scene) when is_binary(input) do
+    prefix = last_word(input)
+
+    matches =
+      input
+      |> candidates(scene)
+      |> Enum.uniq()
+      |> Enum.filter(&String.starts_with?(&1, prefix))
+      |> Enum.sort()
+
+    case matches do
+      [] -> {input, []}
+      [one] -> {replace_last(input, prefix, one <> " "), [one]}
+      many -> {replace_last(input, prefix, common_prefix(many)), many}
+    end
+  end
+
+  defp candidates(input, scene) do
+    trimmed = String.trim_leading(input)
+
+    if String.starts_with?(trimmed, "=") do
+      # Inside an expression the useful thing to finish is a path; the eleven
+      # builtins are short enough to type and are listed in the help.
+      fact_paths(scene)
+    else
+      case String.split(trimmed, " ") do
+        [_verb_being_typed] -> verbs()
+        [verb | rest] -> argument(verb, length(rest), scene)
+      end
+    end
+  end
+
+  defp argument("set", 1, scene), do: group_names(scene)
+  defp argument("pane", 1, _scene), do: Map.keys(@panes)
+  defp argument("fact", 1, scene), do: fact_paths(scene)
+  defp argument("filter", 1, scene), do: fact_paths(scene)
+  # A value is whatever the house calls it, so there is nothing honest to
+  # offer. Completing to a guess would be worse than completing to nothing.
+  defp argument(_verb, _position, _scene), do: []
+
+  defp group_names(scene), do: scene.groups |> Map.keys() |> Enum.map(&to_string/1)
+
+  defp fact_paths(scene), do: Enum.map(scene.facts, &Path.to_string(&1.path))
+
+  # The last space-separated token, which is "" directly after a space -- the
+  # case that matters, because that is when the whole candidate list should be
+  # offered rather than nothing.
+  defp last_word(input), do: input |> String.split(" ") |> List.last() |> Kernel.||("")
+
+  defp replace_last(input, prefix, replacement) do
+    String.slice(input, 0, String.length(input) - String.length(prefix)) <> replacement
+  end
+
+  defp common_prefix([first | rest]), do: Enum.reduce(rest, first, &common/2)
+
+  defp common(a, b) do
+    a
+    |> String.graphemes()
+    |> Enum.zip(String.graphemes(b))
+    |> Enum.take_while(fn {x, y} -> x == y end)
+    |> Enum.map_join(fn {x, _y} -> x end)
   end
 end
