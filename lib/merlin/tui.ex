@@ -281,11 +281,21 @@ defmodule Merlin.TUI do
     view = Layout.size(rect)
     seen = Session.to_view(session)
 
-    case session.pane do
-      :facts -> View.Facts.render(scene, seen, view)
-      :rules -> View.Rules.render(scene, seen, view)
-      :stream -> View.Stream.render(scene, seen, view)
-      :devices -> View.Devices.render(scene, seen, view)
+    # Help takes the body rather than floating over it. A partial overlay would
+    # need the pane underneath rendered as well and then composited, which is a
+    # second way for a frame to come out wrong in exchange for nothing an
+    # operator asked for.
+    case session.mode do
+      :help ->
+        View.Help.render(scene, seen, view)
+
+      _other ->
+        case session.pane do
+          :facts -> View.Facts.render(scene, seen, view)
+          :rules -> View.Rules.render(scene, seen, view)
+          :stream -> View.Stream.render(scene, seen, view)
+          :devices -> View.Devices.render(scene, seen, view)
+        end
     end
   end
 

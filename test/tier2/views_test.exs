@@ -277,4 +277,64 @@ defmodule Merlin.ViewsTest do
                Buffer.to_text(Devices.render(off, %{}, {80, 6}))
     end
   end
+
+  # --- the help overlay -----------------------------------------------------
+
+  describe "help" do
+    alias Merlin.TUI.{Command, Keymap}
+    alias Merlin.TUI.View.Help
+
+    defp help_text(size, session \\ %{}) do
+      Buffer.to_text(Help.render(%Scene{now: @now}, session, size))
+    end
+
+    property "it is exactly the size it was asked for, at any size" do
+      check all w <- integer(8..200),
+                h <- integer(4..60) do
+        buffer = Help.render(%Scene{now: @now}, %{}, {w, h})
+        assert buffer.w == w and buffer.h == h
+      end
+    end
+
+    # The reason the overlay exists. If a command can be typed and is not
+    # named here, it is undiscoverable -- which was the whole complaint.
+    test "every command form appears" do
+      text = help_text({100, 40})
+
+      for {form, _does} <- Command.help() do
+        assert String.contains?(text, form),
+               "the help does not mention #{inspect(form)}, so nothing does"
+      end
+    end
+
+    test "every documented key appears" do
+      text = help_text({100, 40})
+
+      for entry <- Keymap.entries() do
+        assert String.contains?(text, entry.shown),
+               "the help does not show #{inspect(entry.shown)}"
+      end
+    end
+
+    # Sensitivity: the overlay must be reading the tables, not a copy of them
+    # frozen at the time it was written.
+    test "scrolling moves the text" do
+      refute help_text({100, 12}) == help_text({100, 12}, %{help_scroll: 4})
+    end
+
+    test "it says how to close, and how to scroll when it does not fit" do
+      assert String.contains?(help_text({100, 12}), "scroll")
+      assert String.contains?(help_text({100, 80}), "closes")
+    end
+
+    # A window dragged very small must not take the session down. Buffer.box/6
+    # is guarded on w >= 2 and h >= 2, and the interior arithmetic goes
+    # negative before that.
+    test "a tiny rect renders rather than raising" do
+      for {w, h} <- [{1, 1}, {2, 2}, {7, 3}, {8, 4}, {12, 5}] do
+        buffer = Help.render(%Scene{now: @now}, %{}, {w, h})
+        assert buffer.w == w and buffer.h == h
+      end
+    end
+  end
 end

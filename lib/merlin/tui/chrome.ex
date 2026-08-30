@@ -13,7 +13,7 @@ defmodule Merlin.TUI.Chrome do
   than one admitting it has lost the daemon: the first invents a quiet house.
   """
 
-  alias Merlin.TUI.{Buffer, Layout, Scene, Session}
+  alias Merlin.TUI.{Buffer, Keymap, Layout, Scene, Session}
 
   @doc "The title row: who we are, what mode, and which pane."
   @spec header(Scene.t(), Session.t(), Layout.rect()) :: Buffer.t()
@@ -73,7 +73,7 @@ defmodule Merlin.TUI.Chrome do
     case {session.mode, session.pending} do
       {:confirm, %{} = pending} -> confirmation(buffer, scene, pending)
       {:command, _} -> Buffer.write(buffer, 0, 0, ":" <> session.input <> "_", [:bright])
-      _ -> Buffer.write(buffer, 0, 0, ": for a command, / to filter, q to quit", [:faint])
+      _ -> Buffer.write(buffer, 0, 0, ":  command      /  filter      ?  help      q  quit", [:faint])
     end
   end
 
@@ -101,8 +101,8 @@ defmodule Merlin.TUI.Chrome do
     end)
   end
 
-  defp hint(:facts), do: "j/k move, / filter, : command"
-  defp hint(:rules), do: "j/k move -- why a rule did not fire"
-  defp hint(:stream), do: "changes, events and what became of every effect"
-  defp hint(:devices), do: "j/k move, : set <group> <value>"
+  # Derived from the bindings themselves. Written out here, these were four
+  # sentences that had to be kept true by hand -- and one of them advertised a
+  # key (`?`) that by then explained rules only in the rules pane.
+  defp hint(pane), do: Keymap.hint(pane)
 end
