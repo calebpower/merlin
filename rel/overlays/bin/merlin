@@ -19,6 +19,36 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 MERLIN_ARGV=$(printf '%s\n' "$@")
 export MERLIN_ARGV
 
+# The terminal size, read HERE, because here is where the terminal is.
+#
+# The client runs under `merlind eval`, and inside that VM both probes in
+# Merlin.TUI.Term.size/0 fail: `stty -f /dev/tty size` and `tput` each come
+# back empty, so it fell through to its 80x24 default and drew an 80-column
+# frame in the corner of whatever window you actually had. On a 40-row
+# terminal the help overlay rendered 24 rows tall and put half of itself below
+# the fold.
+#
+# This shell does have the terminal. Term.size/0's third fallback is COLUMNS
+# and LINES -- a path that already existed and was never reachable, because
+# nothing ever set them. `stty size` reports rows first, which is the opposite
+# order to everything else here and is exactly the transposition that produces
+# a frame nobody can explain.
+#
+# Both paths get this, one-shot included: `merlin --once` in a bug report
+# should be the frame the reporter was looking at.
+if _size=$(stty size 2>/dev/null); then
+    _rows=${_size%% *}
+    _cols=${_size##* }
+    # "0 0" is what a pty with no controlling terminal answers. Passing that on
+    # would ask for a zero-column grid; leaving it unset lets Term decide.
+    if [ "${_rows:-0}" -gt 0 ] 2>/dev/null && [ "${_cols:-0}" -gt 0 ] 2>/dev/null; then
+        LINES=$_rows
+        COLUMNS=$_cols
+        export LINES COLUMNS
+    fi
+    unset _size _rows _cols
+fi
+
 # One-shot commands never touch the tty, so they take the simple path and may
 # exec: there is nothing to restore afterwards.
 case "${1:-}" in

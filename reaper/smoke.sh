@@ -386,6 +386,30 @@ grep -q 'DRY-RUN\|LIVE' "$frame_out" || die "the frame carries no mode banner"
 awk 'length != 80 { print "line " NR " is " length " columns, not 80"; bad=1 }
      END { exit bad ? 1 : 0 }' "$frame_out"     || die "the frame is not rectangular"
 
+# The size when it is NOT given explicitly.
+#
+# Every frame assertion above passes --cols and --rows, so not one of them
+# could ever have exercised Merlin.TUI.Term.size/0 -- and it was broken on the
+# deployed release, falling through to 80x24 whatever the terminal was. The
+# help overlay rendered 24 rows tall on a 40-row window as a result. The
+# wrapper now reads the size where the terminal is and exports it; this is the
+# half of that fix which lives in Elixir, asserted end to end against the real
+# release.
+env_frame="$REAPER_OUT/smoke-tui-envsize.txt"
+
+COLUMNS=100 LINES=30 "$TUIBIN" --once > "$env_frame" 2>"$REAPER_OUT/smoke-tui.err" \
+    || die "merlin --once failed with the size in the environment"
+
+awk 'length != 100 { print "line " NR " is " length " columns, not 100"; bad=1 }
+     END { exit bad ? 1 : 0 }' "$env_frame" \
+    || die "the frame ignored COLUMNS -- Term.size/0 fell back to its default"
+
+env_rows=$(wc -l < "$env_frame" | tr -d ' ')
+[ "$env_rows" -eq 30 ] \
+    || die "the frame is $env_rows rows, not the 30 LINES asked for"
+
+say "--once honors the size it is given through the environment"
+
 # No escape sequences: --once writes text, so a frame that carries them means
 # the renderer leaked ANSI into what should be plain output.
 if LC_ALL=C grep -q "$(printf '\033')" "$frame_out"; then
