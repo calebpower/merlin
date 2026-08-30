@@ -201,4 +201,101 @@ defmodule Merlin.TUICommandTest do
       end
     end
   end
+
+  # --- completion -----------------------------------------------------------
+
+  describe "Tab completion" do
+    defp fact(path) do
+      %Merlin.Fact{
+        path: path,
+        value: :on,
+        changed_at: 0,
+        observed_at: 0,
+        source: nil,
+        seq: 1,
+        stale_after: nil
+      }
+    end
+
+    defp scene do
+      %Merlin.TUI.Scene{
+        facts: [
+          fact([:person, :cal, :zone]),
+          fact([:person, :cal, :lat]),
+          fact([:door, :front_door, :contact])
+        ],
+        groups: %{living_room_lamps: %{members: []}, office_plugs: %{members: []}},
+        now: 0
+      }
+    end
+
+    test "a unique verb completes and adds a space" do
+      assert {"publish ", ["publish"]} = Command.complete("pub", scene())
+    end
+
+    test "an ambiguous prefix advances only as far as the candidates agree" do
+      # `filter` and `fact` share "f"; completing to either would be a guess.
+      {completed, candidates} = Command.complete("f", scene())
+
+      assert completed == "fa" or completed == "f",
+             "completed to #{inspect(completed)}, past the point the candidates agree"
+
+      assert "fact" in candidates and "filter" in candidates
+    end
+
+    test "no match leaves the line exactly as typed" do
+      assert {"zzz", []} = Command.complete("zzz", scene())
+    end
+
+    test "set completes group names, which only the scene knows" do
+      {completed, _candidates} = Command.complete("set living", scene())
+      assert completed == "set living_room_lamps "
+    end
+
+    test "a bare verb and a space offers every argument" do
+      {_completed, candidates} = Command.complete("set ", scene())
+      assert Enum.sort(candidates) == ["living_room_lamps", "office_plugs"]
+    end
+
+    test "fact completes a path" do
+      {completed, _} = Command.complete("fact person.cal.z", scene())
+      assert completed == "fact person.cal.zone "
+    end
+
+    test "pane completes a pane name" do
+      assert {"pane devices ", ["devices"]} = Command.complete("pane dev", scene())
+    end
+
+    test "an expression completes paths" do
+      {completed, _} = Command.complete("= door.front", scene())
+      assert completed == "= door.front_door.contact "
+    end
+
+    # A value is whatever the house calls it. Offering a guess would be worse
+    # than offering nothing, because a completed wrong value looks deliberate.
+    test "a value is not completed" do
+      assert {"set living_room_lamps o", []} = Command.complete("set living_room_lamps o", scene())
+    end
+
+    # Completion and the parser read the same list, so this asserts they agree
+    # about it: a verb offered must at worst produce a USAGE error, never "no
+    # command". Being completed to a word the program then denies knowing is
+    # the most confusing outcome available.
+    test "every verb offered is a word the parser recognizes" do
+      {_completed, verbs} = Command.complete("", scene())
+
+      assert verbs != []
+
+      for verb <- verbs do
+        case Command.parse(verb) do
+          {:error, message} ->
+            refute String.starts_with?(message, "no command"),
+                   "completion offers #{inspect(verb)}, and the parser answers #{inspect(message)}"
+
+          _anything_else ->
+            :ok
+        end
+      end
+    end
+  end
 end

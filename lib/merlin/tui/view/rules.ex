@@ -44,7 +44,7 @@ defmodule Merlin.TUI.View.Rules do
   """
   @spec explanation(Buffer.t(), term(), non_neg_integer(), non_neg_integer()) :: Buffer.t()
   def explanation(buffer, nil, w, h) do
-    Buffer.write(buffer, 0, h - 1, Buffer.fit("? explains the selected rule", w), [:faint])
+    Buffer.write(buffer, 0, h - 1, Buffer.fit("e explains the selected rule -- ? for all keys", w), [:faint])
   end
 
   def explanation(buffer, explanation, w, h) do

@@ -41,7 +41,7 @@ defmodule Merlin.TUI.Session do
           | {:evaluate, binary()}
           | {:explain, atom(), Merlin.Path.t()}
 
-  @type mode :: :normal | :command | :confirm
+  @type mode :: :normal | :command | :confirm | :help
 
   @type t :: %__MODULE__{
           pane: atom(),
@@ -52,6 +52,8 @@ defmodule Merlin.TUI.Session do
           input: binary(),
           pending: map() | nil,
           status: binary() | nil,
+          explanation: term(),
+          help_scroll: non_neg_integer(),
           size: {pos_integer(), pos_integer()},
           who: binary()
         }
@@ -65,6 +67,7 @@ defmodule Merlin.TUI.Session do
             input: "",
             pending: nil,
             status: nil,
+            help_scroll: 0,
             size: {80, 24},
             who: "unknown"
 
@@ -79,7 +82,8 @@ defmodule Merlin.TUI.Session do
   """
   @spec handle_key(t(), Merlin.TUI.Keys.key(), Scene.t()) :: {t(), [action()]}
   def handle_key(%__MODULE__{mode: :confirm} = s, key, _scene), do: confirm(s, key)
-  def handle_key(%__MODULE__{mode: :command} = s, key, _scene), do: command(s, key)
+  def handle_key(%__MODULE__{mode: :help} = s, key, _scene), do: help(s, key)
+  def handle_key(%__MODULE__{mode: :command} = s, key, scene), do: command(s, key, scene)
   def handle_key(%__MODULE__{mode: :normal} = s, key, scene), do: normal(s, key, scene)
 
   # --- normal ---------------------------------------------------------------
@@ -104,10 +108,16 @@ defmodule Merlin.TUI.Session do
   defp normal(s, :end, scene), do: {move_to(s, count(s, scene) - 1, scene), []}
   defp normal(s, {:char, "g"}, scene), do: {move_to(s, 0, scene), []}
   defp normal(s, {:char, "G"}, scene), do: {move_to(s, count(s, scene) - 1, scene), []}
+  # `?` is help, in every pane. It was Explain, which meant the first key an
+  # operator tries did nothing at all in three panes out of four.
+  defp normal(s, {:char, "?"}, _scene) do
+    {%{s | mode: :help, help_scroll: 0, status: nil}, []}
+  end
+
   # The question the rules pane exists to answer. Asks the daemon, because
   # only the daemon can: a guard needs the live world, and a :changes_in
   # trigger needs the loaded groups.
-  defp normal(%{pane: :rules} = s, {:char, "?"}, scene) do
+  defp normal(%{pane: :rules} = s, {:char, "e"}, scene) do
     case Enum.at(scene.rules, s.selected) do
       nil ->
         {s, []}
@@ -129,11 +139,23 @@ defmodule Merlin.TUI.Session do
 
   # --- command line ---------------------------------------------------------
 
-  defp command(s, :escape), do: {%{s | mode: :normal, input: ""}, []}
-  defp command(s, :backspace), do: {%{s | input: String.slice(s.input, 0..-2//1)}, []}
-  defp command(s, {:char, c}), do: {%{s | input: s.input <> c}, []}
+  defp command(s, :escape, _scene), do: {%{s | mode: :normal, input: ""}, []}
 
-  defp command(s, :enter) do
+  defp command(s, :backspace, _scene) do
+    {%{s | input: String.slice(s.input, 0..-2//1)}, []}
+  end
+
+  defp command(s, {:char, c}, _scene), do: {%{s | input: s.input <> c}, []}
+
+  # Tab was decoded by Merlin.TUI.Keys and then thrown away, because nothing
+  # consumed it. A command line with no completion and no discoverable
+  # vocabulary is one you can only use if you already know the answer.
+  defp command(s, :tab, scene) do
+    {completed, candidates} = Command.complete(s.input, scene)
+    {%{s | input: completed, status: offered(candidates)}, []}
+  end
+
+  defp command(s, :enter, _scene) do
     session = %{s | mode: :normal, input: ""}
 
     case Command.parse(s.input) do
@@ -141,7 +163,11 @@ defmodule Merlin.TUI.Session do
         {session, [:quit]}
 
       :help ->
-        {%{session | status: help_line()}, []}
+        # The overlay, not a status line. `help_line/0` joined every command
+        # form onto one row and discarded the descriptions, and the status row
+        # then clipped what was left -- so the one place that explained the
+        # program explained it in truncated syntax.
+        {%{session | mode: :help, help_scroll: 0}, []}
 
       {:control, command} ->
         # Parsed, not armed. The loop asks Control to resolve and describe it,
@@ -168,7 +194,36 @@ defmodule Merlin.TUI.Session do
     end
   end
 
-  defp command(s, _key), do: {s, []}
+  defp command(s, _key, _scene), do: {s, []}
+
+  # Several matches are shown rather than silently applied, and the count is
+  # given when the list is too long to print: an operator who cannot see why
+  # Tab stopped will press it again rather than type the next letter.
+  defp offered([]), do: "no completion"
+  defp offered([_one]), do: nil
+
+  defp offered(many) do
+    shown = Enum.take(many, 8)
+    rest = length(many) - length(shown)
+    Enum.join(shown, "  ") <> if rest > 0, do: "  (+#{rest} more)", else: ""
+  end
+
+  # --- help -----------------------------------------------------------------
+
+  # Scrolls on j/k, and closes on anything else -- including q, which must not
+  # quit the program from here. An overlay you cannot dismiss with the key you
+  # guess first is a trap.
+  defp help(s, key) when key in [:down, {:char, "j"}] do
+    {%{s | help_scroll: s.help_scroll + 1}, []}
+  end
+
+  defp help(s, key) when key in [:up, {:char, "k"}] do
+    {%{s | help_scroll: max(s.help_scroll - 1, 0)}, []}
+  end
+
+  defp help(s, :page_down), do: {%{s | help_scroll: s.help_scroll + 10}, []}
+  defp help(s, :page_up), do: {%{s | help_scroll: max(s.help_scroll - 10, 0)}, []}
+  defp help(s, _key), do: {%{s | mode: :normal, help_scroll: 0}, []}
 
   # --- confirmation ---------------------------------------------------------
 
@@ -221,6 +276,8 @@ defmodule Merlin.TUI.Session do
       selected: s.selected,
       scroll: s.scroll,
       pane: s.pane,
+      mode: s.mode,
+      help_scroll: s.help_scroll,
       explanation: s.explanation
     }
   end
@@ -278,7 +335,4 @@ defmodule Merlin.TUI.Session do
   defp count(%{pane: :stream}, scene), do: length(scene.stream)
   defp count(%{pane: :devices}, scene), do: map_size(scene.groups)
 
-  defp help_line do
-    Command.help() |> Enum.map_join("  ", fn {form, _} -> form end)
-  end
 end

@@ -16,6 +16,11 @@ defmodule Merlin.MixProject do
       elixirc_options: [warnings_as_errors: true],
       elixirc_paths: elixirc_paths(Mix.env()),
       test_paths: ["test"],
+      # Committed tier 9 traces are DATA -- the actions that reproduced a
+      # violation -- not test files. Without this Mix warns that they match no
+      # load filter, which is correct and unhelpful: they are meant to be read
+      # by a person and eval'd deliberately, never collected as a suite.
+      test_ignore_filters: [~r{^test/tier9/traces/}],
       dialyzer: dialyzer()
     ]
   end
