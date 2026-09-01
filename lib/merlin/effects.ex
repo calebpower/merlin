@@ -118,7 +118,30 @@ defmodule Merlin.Effects do
             {:held, remaining}
 
           true ->
-            do_perform(effect, source, cause)
+            # An effect that WORKED used to be the only outcome that said
+            # nothing. Dry-run logged, a settle hold logged, a failure logged
+            # -- success alone was silent, so turning dry_run off did not
+            # promote the log from decisions to actions, it deleted it. The
+            # fortnight of `[dry-run]` lines was the most legible this daemon
+            # had ever been, and the reward for trusting it was silence.
+            #
+            # `Settle.suppresses?/1` is reused rather than a second list of
+            # "effects that reach the house" written out here, because two
+            # copies of that list is precisely how this codebase's defects get
+            # in. It is already the tested definition of outward actuation.
+            case do_perform(effect, source, cause) do
+              :performed = performed ->
+                if Merlin.Settle.suppresses?(effect) and not narrates_itself?(effect) do
+                  Logger.info("[live] #{describe(effect)}#{source_suffix(source)}")
+                end
+
+                performed
+
+              {:failed, _reason} = failed ->
+                # do_perform already logged the reason, which is the part a
+                # reader needs and this line does not have.
+                failed
+            end
         end
 
       Tap.notify(outcome, effect, source)
@@ -137,6 +160,13 @@ defmodule Merlin.Effects do
 
   def describe({:log, level, message}), do: "log #{level}: #{message}"
   def describe({:notify, channel, message}), do: "notify #{channel}: #{message}"
+
+  # Effects whose whole content is a log line already. Logging "[live] notify
+  # log: ..." beside the "[notify] ..." the effect itself writes would say the
+  # same thing twice and make one event look like two.
+  defp narrates_itself?({:notify, _channel, _message}), do: true
+  defp narrates_itself?({:log, _level, _message}), do: true
+  defp narrates_itself?(_effect), do: false
 
   # --- resolution -----------------------------------------------------------
 
