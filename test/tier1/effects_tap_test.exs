@@ -19,9 +19,27 @@ defmodule Merlin.EffectsTapTest do
   needs a broker and belongs to tier 6; the two effects exercised here for
   success (`:log` and `notify :log`) dispatch to the logger and nowhere else,
   deliberately, so this tier needs no transport at all.
+
+  ## The half of that paragraph which was a bug, not a limitation
+
+  "a dispatch that *succeeded* produced no message at all" was written above as
+  a description of the OLD code, and stayed true of the new code for the whole
+  soak, because fixing the outcome as a *value* for the tap was mistaken for
+  fixing it. It was not: nothing wrote a log line when an effect worked. In dry
+  run that is invisible -- the dry-run branch logs -- so the daemon read as
+  fully narrated right up until `dry_run` was turned off, at which point the
+  log went silent and the house started actually moving.
+
+  The positive case needs a broker and lives in tier 6. What lives here is the
+  half that does not: an effect whose whole content is a log line must not be
+  announced a second time.
   """
 
   use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
+
+  require Logger
 
   @moduletag :tier1
 
@@ -251,6 +269,48 @@ defmodule Merlin.EffectsTapTest do
 
       assert_receive {:effects, :r, [{:log, :info, "x"}]}
       assert_receive {:merlin_effect, %Report{outcome: :dry_run}}
+    end
+  end
+
+  describe "a live effect says so, exactly once" do
+    setup do
+      # These assert on log lines, so the level must be low enough to emit them
+      # and restored afterwards or every later test inherits the change.
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+      :ok
+    end
+
+    # {:notify, :log, _} and {:log, _, _} write their own line. A "[live]"
+    # announcement beside it would make one event look like two, and in an
+    # alerting path -- both vehicle rules and the intruder latch ship as
+    # {:notify, :log, _} -- two lines read as two incidents.
+    test "a notify-to-log effect is not announced twice" do
+      log = capture_log(fn -> Effects.perform([{:notify, :log, "intruder"}], rule: :r) end)
+
+      assert log =~ "intruder"
+      refute log =~ "[live]",
+             "a self-logging effect was announced by [live] as well as by itself"
+    end
+
+    test "a log effect is not announced twice" do
+      log = capture_log(fn -> Effects.perform([{:log, :info, "hello"}], rule: :r) end)
+
+      assert log =~ "hello"
+      refute log =~ "[live]"
+    end
+
+    # The control. If [live] were never emitted for anything, the two tests
+    # above would pass on an implementation that deleted the feature outright,
+    # which is the failure mode they exist to prevent. A set_fact is not an
+    # outward effect either, so this pins the boundary from the other side:
+    # what is NOT announced is a decision, not an accident of the log level.
+    test "an internal fact write is not announced as an outward effect" do
+      log = capture_log(fn -> Effects.perform([{:set_fact, [:t, "x"], 1}], rule: :r) end)
+
+      refute log =~ "[live]",
+             "set_fact is internal bookkeeping and must not read as the house moving"
     end
   end
 
