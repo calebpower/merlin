@@ -218,9 +218,26 @@ defmodule Merlin.MQTT.Connection do
     # the arrival itself can. See `Merlin.Derive.Geofence`.
     observation = System.unique_integer([:monotonic, :positive])
 
+    # How long a fact from this source stays an answer.
+    #
+    # Read here rather than returned by the adapter, because it is a write
+    # policy and not a fact about the payload -- and `Merlin.Adapter` is
+    # explicit that the framework, not the adapter, decides how to write.
+    # Every adapter gets this for free and none of them can forget it.
+    #
+    # Without it a battery-powered sensor that has gone flat reports its last
+    # reading for ever and every guard reading it keeps answering as though
+    # the value were current. `:http_poll` has had `stale_after_ms` since M6;
+    # the MQTT path simply never passed one, so the horizon was unreachable
+    # for exactly the sources most likely to go quiet.
+    stale_after = source_stale_after(opts)
+
     case module.handle_ingress(topic, payload, captures, opts) do
       {:ok, emissions} ->
-        Enum.each(emissions, &apply_emission(&1, module, captures, observation, state))
+        Enum.each(
+          emissions,
+          &apply_emission(&1, module, captures, observation, stale_after, state)
+        )
 
       {:error, reason} ->
         Logger.warning("#{inspect(module)} rejected #{topic}: #{inspect(reason)}")
@@ -238,15 +255,18 @@ defmodule Merlin.MQTT.Connection do
 
   # The captures come from the router, not from the adapter, so an adapter
   # cannot forget to pass them on and every source gets them for free.
-  defp apply_emission({:fact, path, value}, module, captures, observation, _state) do
+  defp apply_emission({:fact, path, value}, module, captures, observation, stale_after, _state) do
     World.put(path, value,
       source: {:adapter, module},
       captures: captures,
-      observation: observation
+      observation: observation,
+      stale_after: stale_after
     )
   end
 
-  defp apply_emission({:event, path, payload}, module, captures, _observation, _state) do
+  defp apply_emission({:event, path, payload}, module, captures, _observation, _stale, _state) do
+    # Events carry no horizon. An edge is delivered once and never read back,
+    # so there is nothing for staleness to describe.
     World.emit(path, payload, source: {:adapter, module}, captures: captures)
   end
 
@@ -264,6 +284,7 @@ defmodule Merlin.MQTT.Connection do
          module,
          _captures,
          _observation,
+         _stale_after,
          state
        ) do
     if Merlin.Settle.settling?() and Merlin.Settle.suppresses?(emission) do
@@ -273,6 +294,16 @@ defmodule Merlin.MQTT.Connection do
       )
     else
       do_publish(topic, payload, opts, state)
+    end
+  end
+
+  # nil when the source declares nothing, which leaves World.put/3's existing
+  # behaviour untouched: a fact with no horizon never goes stale, exactly as
+  # before this option existed.
+  defp source_stale_after(opts) do
+    case Keyword.get(opts, :source) do
+      %{} = source -> Map.get(source, :stale_after_ms)
+      _ -> nil
     end
   end
 

@@ -195,11 +195,27 @@ defmodule Merlin.Config.File do
           # A filter that will not compile is a boot failure, not a runtime
           # surprise on the first message that would have matched it.
           case Merlin.MQTT.Router.add(Merlin.MQTT.Router.new(), source.topic, :x) do
-            {:ok, _} -> shadowed_captures(source)
+            {:ok, _} -> shadowed_captures(source) ++ source_stale_after_errors(source)
             {:error, reason} -> [{:bad_topic_filter, source.id, source.topic, reason}]
           end
       end
     end)
+  end
+
+  # `stale_after_ms` on an MQTT source, spelled and validated exactly as
+  # `:http_poll` already spells it, because one horizon with two names would be
+  # the next thing to drift.
+  #
+  # A garbled value must fail at boot rather than silently mean "no horizon".
+  # This option's whole purpose is to notice a sensor that has stopped talking,
+  # so a typo that quietly disables it would remove the very check it was added
+  # for -- and leave the house looking exactly as it did before.
+  defp source_stale_after_errors(source) do
+    case Map.get(source, :stale_after_ms) do
+      nil -> []
+      ms when is_integer(ms) and ms > 0 -> []
+      other -> [{:source_bad_stale_after, source.id, other}]
+    end
   end
 
   # The keys `trigger.*` already means. A capture sharing one of these names
@@ -663,6 +679,12 @@ defmodule Merlin.Config.File do
     do:
       "#{inspect(id)} declares max_speed: #{inspect(speed)}, which is not a positive speed. " <>
         "Use {120, :kph}, {75, :mph} or {33, :mps}."
+
+  defp describe({:source_bad_stale_after, id, value}),
+    do:
+      "source #{inspect(id)} declares stale_after_ms: #{inspect(value)}, which is not a " <>
+        "positive whole number of milliseconds. Use stale_after_ms: 3_600_000 for an hour. " <>
+        "Omit the key entirely for a fact that never goes stale."
 
   defp describe({:unknown_zone, where, zone, declared}),
     do:
