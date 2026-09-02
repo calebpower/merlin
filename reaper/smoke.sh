@@ -790,6 +790,98 @@ fi
 say "dry_run blocked the publish, as it must"
 
 # ---------------------------------------------------------------------------
+# ...and with dry_run OFF the effect must both HAPPEN and SAY SO.
+#
+# The block above is only half a test. It proves the publish is blocked; it
+# says nothing about what the daemon does when it is allowed to act, and the
+# half it omitted is where the defect was: `Effects.perform/2` logged the
+# dry-run discard, logged a settle hold, logged a failure -- and logged
+# NOTHING when a dispatch succeeded. Turning dry_run off therefore did not
+# promote the log from decisions to actions, it emptied it, and the house went
+# from fully narrated to silent at the exact moment the effects became real.
+#
+# It survived because every existing assertion about effect logging ran in
+# dry-run, which is the one mode where the line is written. The same shape as
+# the pane that was never rendered and the window that was never tested: the
+# suite was arranged so the broken path could not run.
+# ---------------------------------------------------------------------------
+say "checking a LIVE effect both happens and is logged"
+
+"$REL/bin/merlind" stop >/dev/null 2>&1 || true
+sleep 1
+
+MERLIN_DRY_RUN=false
+export MERLIN_DRY_RUN
+export MERLIN_CLIENT_ID="merlin-smoke-live-$$"
+"$REL/bin/merlind" daemon || die "release failed to restart with dry_run off"
+
+i=0
+up=false
+while [ "$i" -lt 40 ]; do
+    up=$("$REL/bin/merlind" rpc 'IO.puts(to_string(Merlin.MQTT.Connection.connected?()))' 2>>"$rpc_err" | tail -1)
+    [ "$up" = "true" ] && break
+    i=$((i + 1))
+    sleep 0.25
+done
+[ "$up" = "true" ] || die "daemon did not connect with dry_run off; the next assertion would be vacuous"
+
+# Connecting opens a settle window of its own, and a held effect logs
+# "[settling]" rather than "[live]". Wait it out, or this asserts the wrong
+# branch and passes for the wrong reason.
+sleep 4
+
+live_out="$REAPER_OUT/smoke-live.txt"
+: > "$live_out"
+/usr/local/bin/mosquitto_sub -h 127.0.0.1 -t 'test/pong' -C 1 -W 6 > "$live_out" 2>/dev/null &
+live_sub=$!
+sleep 0.3
+/usr/local/bin/mosquitto_pub -h 127.0.0.1 -t 'test/ping' -m 'hello' 2>/dev/null || true
+wait "$live_sub" 2>/dev/null || true
+
+[ -s "$live_out" ] \
+    || die "dry_run was off and the publish still did not reach the broker"
+say "the live publish reached the broker"
+
+live_log=$(find "$MERLIN_STATE_DIR/tmp" -name '*.log*' -exec cat {} + 2>/dev/null)
+
+printf '%s' "$live_log" | grep -q '\[live\] publish test/pong' \
+    || die "the effect happened and the log never said so -- a live daemon that actuates the house in silence"
+say "the live effect named itself in the log"
+
+# The line must be the LIVE one, not a dry-run line left over from the block
+# above being misread as success.
+printf '%s' "$live_log" | grep '\[live\] publish test/pong' | grep -q 'dry-run' \
+    && die "the [live] line is somehow also a dry-run line; the assertion above is not reading what it thinks"
+
+# An effect whose whole content is a log line must not be announced twice.
+# `{:notify, :log, ...}` writes "[notify] ..." itself; a "[live] notify log:"
+# beside it would make one event look like two, which in an alerting path is
+# the difference between one intrusion and two.
+dupes=$(printf '%s' "$live_log" | grep -c '\[live\] notify' || true)
+[ "$dupes" -eq 0 ] \
+    || die "a self-logging notify effect was announced twice ($dupes [live] notify lines)"
+say "self-logging effects are not announced twice"
+
+# Put the daemon back exactly as the sections below expect to find it:
+# running, connected, and in dry-run mode.
+"$REL/bin/merlind" stop >/dev/null 2>&1 || true
+sleep 1
+MERLIN_DRY_RUN=true
+export MERLIN_DRY_RUN
+export MERLIN_CLIENT_ID="merlin-smoke-dry2-$$"
+"$REL/bin/merlind" daemon || die "release failed to return to dry-run mode"
+
+i=0
+up=false
+while [ "$i" -lt 40 ]; do
+    up=$("$REL/bin/merlind" rpc 'IO.puts(to_string(Merlin.MQTT.Connection.connected?()))' 2>>"$rpc_err" | tail -1)
+    [ "$up" = "true" ] && break
+    i=$((i + 1))
+    sleep 0.25
+done
+[ "$up" = "true" ] || die "daemon did not reconnect after returning to dry-run mode"
+
+# ---------------------------------------------------------------------------
 # Persistence and the restart (bug 8).
 #
 # The acceptance-gate case: leave, have a door move, then restart the daemon
