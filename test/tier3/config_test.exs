@@ -530,6 +530,43 @@ defmodule Merlin.ConfigSourceTest do
       assert Enum.any?(errors, &match?({:bad_topic_filter, :s, _, _}, &1))
     end
 
+    # stale_after_ms is the only thing standing between a dead battery and a
+    # daemon that keeps acting on the last thing a sensor said. A typo that
+    # silently meant "no horizon" would remove exactly the check it was added
+    # for, and the house would look identical either way -- so a bad value has
+    # to refuse to boot rather than be ignored.
+    test "a source with a nonsense stale_after_ms is refused" do
+      # "1h" is the plausible typo; 0 and -5 are horizons no fact can satisfy;
+      # 1.5 is milliseconds someone thought were seconds.
+      for bad <- ["1h", 0, -5, 1.5, :never] do
+        config = %{sources: [%{id: :s, topic: "a/b", stale_after_ms: bad}], groups: [], rules: []}
+
+        assert {:error, errors} = Config.File.validate(config),
+               "stale_after_ms: #{inspect(bad)} was accepted"
+
+        assert Enum.any?(errors, &match?({:source_bad_stale_after, :s, ^bad}, &1)),
+               "stale_after_ms: #{inspect(bad)} produced no source_bad_stale_after error"
+      end
+    end
+
+    # The control: a good value, and no value, must both pass. Without this the
+    # test above is satisfied by a validator that rejects the key outright.
+    test "a positive stale_after_ms, and its absence, both validate" do
+      good = %{sources: [%{id: :s, topic: "a/b", stale_after_ms: 60_000}], groups: [], rules: []}
+      absent = %{sources: [%{id: :s, topic: "a/b"}], groups: [], rules: []}
+
+      for config <- [good, absent] do
+        case Config.File.validate(config) do
+          {:ok, _} ->
+            :ok
+
+          {:error, errors} ->
+            refute Enum.any?(errors, &match?({:source_bad_stale_after, _, _}, &1)),
+                   "a valid stale_after_ms was reported as bad: #{inspect(errors)}"
+        end
+      end
+    end
+
     test "a rule triggering on an unknown group" do
       config = %{
         groups: [],
