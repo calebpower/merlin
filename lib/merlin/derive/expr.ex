@@ -49,7 +49,7 @@ defmodule Merlin.Derive.Expr do
 
   alias Merlin.{Expr, Fact, Groups, World}
 
-  defstruct [:id, :out_path, :expr, :hold_ms, :pending_ref]
+  defstruct [:id, :out_path, :expr, :hold_ms, :pending_ref, horizon_ref: nil]
 
   @doc false
   def start_link(spec), do: GenServer.start_link(__MODULE__, spec, name: via(spec.id))
@@ -92,17 +92,26 @@ defmodule Merlin.Derive.Expr do
       World.put(state.out_path, true, source: {:derive, state.id})
     end
 
-    {:noreply, %{state | pending_ref: nil}}
+    {:noreply, arm_horizon(%{state | pending_ref: nil})}
+  end
+
+  # A dependency crossed its staleness horizon. Nothing else changed -- that
+  # is what a quiet sensor means -- so nothing else was ever going to make us
+  # look. Re-evaluate now, and the stale input reads :unknown.
+  def handle_info({:horizon, ref}, %{horizon_ref: ref} = state) do
+    {:noreply, recompute(%{state | horizon_ref: nil})}
   end
 
   def handle_info(_other, state), do: {:noreply, state}
 
-  defp recompute(%{hold_ms: nil} = state) do
+  defp recompute(state), do: state |> do_recompute() |> arm_horizon()
+
+  defp do_recompute(%{hold_ms: nil} = state) do
     World.put(state.out_path, evaluate(state), source: {:derive, state.id})
     state
   end
 
-  defp recompute(state) do
+  defp do_recompute(state) do
     case evaluate(state) do
       true ->
         # Arm the window if one is not already running. Re-arming on every
@@ -121,6 +130,59 @@ defmodule Merlin.Derive.Expr do
         # be slow to fire and quick to clear.
         World.put(state.out_path, other, source: {:derive, state.id})
         %{state | pending_ref: nil}
+    end
+  end
+
+  # STALENESS IS PASSIVE, AND THIS IS WHAT MAKES IT ACTIVE.
+  #
+  # A fact past its stale_after reads :unknown -- see read/1 -- but nothing
+  # announces the moment it crosses. This process re-reads its inputs only
+  # when one of them CHANGES, and a sensor going quiet is the one event that
+  # produces no change. So a derived fact over a dead sensor sat at its last
+  # value indefinitely, and a rule built to fail safe on exactly that could
+  # never fire. A downstream configuration's own battery found it, not a
+  # reading of this file: a scenario in which a sensor goes quiet and the
+  # load it governs must stop could not pass on a platform where the horizon
+  # was correctly stamped on the fact, because stamping it was only half the
+  # job.
+  #
+  # So after every evaluation, find the input that will go stale soonest and
+  # wake up just after it does. One timer per derived fact, armed only when
+  # some input carries a horizon, re-armed on every evaluation so that a fresh
+  # report pushes it out.
+  #
+  # Inputs that are ALREADY stale are skipped, deliberately. They read
+  # :unknown in the evaluation that just happened, there is nothing to wake up
+  # for until they are refreshed -- and a refresh is a change, which wakes us
+  # anyway. Scheduling for them would fire at once, re-arm at once, and spin.
+  defp arm_horizon(state) do
+    now = System.monotonic_time(:millisecond)
+
+    soonest =
+      state.expr
+      |> Expr.deps()
+      |> Enum.flat_map(fn path ->
+        case World.fetch(path) do
+          {:ok, %Fact{stale_after: ms, observed_at: at}} when is_integer(ms) ->
+            remaining = at + ms - now
+            if remaining > 0, do: [remaining], else: []
+
+          _ ->
+            []
+        end
+      end)
+      |> Enum.min(fn -> nil end)
+
+    case soonest do
+      nil ->
+        %{state | horizon_ref: nil}
+
+      ms ->
+        ref = make_ref()
+        # +1 because Fact.stale?/2 is strictly greater-than: exactly on the
+        # horizon still reads fresh, and we want to land on the far side.
+        Process.send_after(self(), {:horizon, ref}, ms + 1)
+        %{state | horizon_ref: ref}
     end
   end
 
