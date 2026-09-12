@@ -562,10 +562,11 @@ defmodule Merlin.Config.File do
   # house looks quiet rather than broken -- there is no error, no warning, and
   # nothing in any log to notice.
   #
-  # The configuration shipped through M7 compared against `:work` and `:gym`
-  # in the intruder latch, and this house has only ever had `home` and
-  # `workshop`. The whole presence half of the automation would have been
-  # inert, and the dry-run soak would have shown a reassuring silence.
+  # A configuration shipped through M7 compared against zone ids its own
+  # deployment had never declared. The whole presence half of the automation
+  # would have been inert, and a dry-run soak would have shown a reassuring
+  # silence -- a rule that never fires looks exactly like a rule with nothing
+  # to do.
   defp zone_errors(term, rules, zone_ids) do
     from_rules =
       Enum.flat_map(rules, fn rule ->

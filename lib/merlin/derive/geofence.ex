@@ -148,19 +148,21 @@ defmodule Merlin.Derive.Geofence do
   #
   # `stale_after` alone is a guess: thirty minutes is neither long enough to be
   # generous nor short enough to be safe, and it says nothing about geography.
-  # The question a rule actually asks is "could he be somewhere else by now",
-  # and that is answerable -- distance to the nearest other zone, divided by
-  # the fastest he could plausibly travel.
+  # The question a rule actually asks is "could they be somewhere else by
+  # now", and that is answerable -- distance to the nearest other zone, divided
+  # by the fastest they could plausibly travel.
   #
   # Straight-line, so it is a genuine lower bound: no route is shorter than the
-  # great circle. If it says the workshop is eight minutes from home and four
-  # have passed, he certainly has not arrived, whatever road he took.
+  # great circle. If a zone is eight minutes from home and four have passed,
+  # the subject cannot have arrived, whatever road was taken.
   #
-  # This is not hypothetical. A phone went flat at the workshop at the evening; the
-  # car came home at an hour later; a door opened at three minutes after that; and the intruder latch
-  # fired, because the zone still said `:workshop` an hour after anyone could
-  # possibly know that. Without a declared `max_speed` the behaviour is
-  # unchanged, so this costs nothing to leave out.
+  # This is not hypothetical, and a deployment reported the shape of it: a
+  # phone stopped reporting while its owner was at a named zone, the vehicle
+  # reached home an hour later, a door opened three minutes after that, and the
+  # intruder latch fired -- because the last fix still named the old zone long
+  # after it could be true. A stale position is not a position. Without a
+  # declared `max_speed` the behaviour is unchanged, so this costs nothing to
+  # leave out.
   defp certainty_window_ms(_point, _zone, %{max_speed: nil}), do: :infinity
 
   defp certainty_window_ms(point, zone, state) do
@@ -255,7 +257,7 @@ defmodule Merlin.Derive.Geofence do
       :unknown ->
         # No usable fix at all -- absent, stale or too vague. Distinct from
         # `:incoherent`, which holds; this one publishes, because "we cannot
-        # place him" is an answer and rules decline on it.
+        # place them" is an answer and rules decline on it.
         if previous != :unknown do
           Logger.info("#{state.id}: #{inspect(previous)} -> :unknown")
         end

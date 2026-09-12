@@ -355,7 +355,7 @@
       # standing indefinitely.
       #
       # A flat stale_after cannot express this. Thirty minutes is neither
-      # generous nor safe and says nothing about geography; "could he be home
+      # generous nor safe and says nothing about geography; "could they be home
       # by now" is the question the rules actually ask, and distance divided
       # by speed answers it.
       #
@@ -710,7 +710,7 @@
               # -- so walking around the house while the phone had no fix was
               # indistinguishable from someone coming in through a window.
               on: {:changes_in, :exterior_doors},
-              # Any time we can SEE he is not home -- at the workshop, at the
+              # Any time we can SEE they are not home -- at the workshop, at the
               # supermarket, anywhere with a usable fix outside the house.
               #
               # The :unknown exclusion is what stops a lost phone from firing

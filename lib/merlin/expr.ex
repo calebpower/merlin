@@ -289,8 +289,8 @@ defmodule Merlin.Expr do
   it loads, and it is simply never true. The rule then does nothing, for ever,
   silently, and the house looks quiet rather than broken.
 
-  That is not hypothetical: the configuration shipped through M7 compared
-  against `:work` and `:gym`, neither of which this house has ever had.
+  That is not hypothetical: a configuration shipped through M7 compared against
+  zone ids its own deployment had never declared, and nothing said so.
   """
   @spec zone_atoms(t()) :: [atom()]
   def zone_atoms(%__MODULE__{node: node}), do: node |> collect_zone_atoms() |> Enum.uniq()

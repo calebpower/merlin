@@ -95,8 +95,8 @@ defmodule Merlin.Zones do
         #
         # We have a usable fix and it is not inside anything named. That is a
         # different claim from "we do not know where the phone is", and
-        # collapsing them into one value is why the house could not tell "he
-        # is at the supermarket" from "his phone is off".
+        # collapsing them into one value is why a deployment could not tell
+        # "they are at the supermarket" from "their phone is off".
         #
         # The consequence was that both the intruder latch and the
         # lights-off-when-away rule only worked when the phone happened to be
