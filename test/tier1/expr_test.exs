@@ -495,4 +495,90 @@ defmodule Merlin.ExprTest do
       assert {:ok, _} = Expr.compile("person.owner.zone != :away")
     end
   end
+
+  describe "unchanged_for?/2 -- the one builtin that asks about TIME" do
+    defp with_elapsed(map) do
+      %{unchanged_ms: fn path -> Map.get(map, path, :unknown) end}
+    end
+
+    test "is true only once the fact has sat still for longer than the duration" do
+      assert ev("unchanged_for?(a.b, 1000)", with_elapsed(%{[:a, :b] => 1001})) == true
+      assert ev("unchanged_for?(a.b, 1000)", with_elapsed(%{[:a, :b] => 999})) == false
+    end
+
+    # Strictly greater, matching Fact.stale?/2. Landing exactly on the boundary
+    # reads false, which is why arm_horizon schedules for ms + 1.
+    test "exactly on the boundary is false, as staleness is" do
+      assert ev("unchanged_for?(a.b, 1000)", with_elapsed(%{[:a, :b] => 1000})) == false
+    end
+
+    # THE SAFETY PROPERTY, and the reason ignorance propagates here rather than
+    # being answered. A fact nobody has heard from has no honest answer to "how
+    # long since it changed"; `false` would assert that it is moving fine, which
+    # is the one reading that could keep a machine running against dead feedback.
+    test "propagates :unknown for a fact that is stale or has never arrived" do
+      assert ev("unchanged_for?(missing.thing, 1000)", with_elapsed(%{})) == :unknown
+    end
+
+    test "never answers true about a fact it knows nothing about" do
+      for ms <- [1, 1000, 86_400_000] do
+        refute ev("unchanged_for?(missing.thing, #{ms})", with_elapsed(%{})) == true
+      end
+    end
+
+    # It composes with the rest of the language, so the tri-state rules apply
+    # unchanged: an :unknown here stops a conjunction from firing.
+    test "an :unknown input stops a guard that would otherwise fire" do
+      env =
+        Map.merge(
+          with_elapsed(%{}),
+          %{read: fn _ -> :on end}
+        )
+
+      assert ev("plug.power == :on and unchanged_for?(missing.thing, 1000)", env) == :unknown
+    end
+
+    test "the path is still a dependency, so subscriptions are unaffected" do
+      {:ok, e} = Expr.compile("unchanged_for?(office.temp_c, 1000)")
+      assert Expr.deps(e) == [[:office, :temp_c]]
+    end
+
+    # What the derive arms its timer from. Without this the condition becomes
+    # true with no write to announce it and nothing ever re-evaluates.
+    test "reports its horizon so a derive can wake for it" do
+      {:ok, e} = Expr.compile("unchanged_for?(office.temp_c, {15, :minute})")
+      assert Expr.horizons(e) == [{[:office, :temp_c], 900_000}]
+    end
+
+    test "an expression with no temporal predicate reports no horizon" do
+      {:ok, e} = Expr.compile("office.temp_c > 20.0")
+      assert Expr.horizons(e) == []
+    end
+
+    test "accepts the duration forms the rest of the config uses" do
+      assert {:ok, _} = Expr.compile("unchanged_for?(a.b, 5000)")
+      assert {:ok, _} = Expr.compile("unchanged_for?(a.b, {90, :minute})")
+      assert {:ok, _} = Expr.compile("unchanged_for?(a.b, {2, :hour})")
+    end
+
+    # Refused at COMPILE time, so a mistake is a boot error rather than a rule
+    # that silently never fires -- the failure mode this language is built to
+    # avoid everywhere else.
+    test "refuses a first argument that is not a path" do
+      assert {:error, {:unchanged_for_path, _, _}} = Expr.compile("unchanged_for?(1 + 1, 1000)")
+    end
+
+    test "refuses a duration it cannot resolve" do
+      assert {:error, {:unchanged_for_duration, _, _}} =
+               Expr.compile("unchanged_for?(a.b, {15, :fortnight})")
+    end
+
+    test "refuses a zero duration, which would be true the instant after any change" do
+      assert {:error, {:unchanged_for_zero, _}} = Expr.compile("unchanged_for?(a.b, 0)")
+    end
+
+    test "refuses the wrong arity like any other builtin" do
+      assert {:error, {:wrong_arity, :unchanged_for?, 1, _}} = Expr.compile("unchanged_for?(a.b)")
+    end
+  end
 end
