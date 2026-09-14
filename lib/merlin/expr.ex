@@ -52,7 +52,8 @@ defmodule Merlin.Expr do
           optional(:read) => (Merlin.Path.t() -> value()),
           optional(:trigger) => map(),
           optional(:locals) => map(),
-          optional(:group) => (atom() -> [Merlin.Path.t()])
+          optional(:group) => (atom() -> [Merlin.Path.t()]),
+          optional(:unchanged_ms) => (Merlin.Path.t() -> non_neg_integer() | :unknown)
         }
   @type t :: %__MODULE__{
           source: binary(),
@@ -62,9 +63,10 @@ defmodule Merlin.Expr do
 
   @operators [:==, :!=, :<, :<=, :>, :>=, :and, :or, :not, :in, :+, :-, :*, :/]
 
-  # {name, arity} => implementation. The budget is 25; this is 11.
+  # {name, arity} => implementation. The budget is 25; this is 12.
   @builtins %{
     {:if, 3} => :if_,
+    {:unchanged_for?, 2} => :unchanged_for?,
     {:defined?, 1} => :defined?,
     {:unknown?, 1} => :unknown?,
     {:all_eq?, 2} => :all_eq?,
@@ -146,6 +148,27 @@ defmodule Merlin.Expr do
   @spec deps(t()) :: [Merlin.Path.t()]
   def deps(%__MODULE__{deps: deps}), do: deps
 
+  @doc """
+  Every `{path, ms}` this expression can become true by the mere PASSING of time.
+
+  Today that is `unchanged_for?` and nothing else. It exists because a derive
+  that depends on such an expression would otherwise never re-evaluate: PR #7
+  taught `Merlin.Derive.Expr` to wake for a staleness horizon, and this is the
+  same problem one step further on. "Unchanged for fifteen minutes" is true
+  precisely when no write has arrived, so there is no change to trigger the
+  re-read that would notice it. The caller arms a timer; see `arm_horizon/1`.
+  """
+  @spec horizons(t()) :: [{Merlin.Path.t(), pos_integer()}]
+  def horizons(%__MODULE__{node: node}), do: node |> collect_horizons() |> Enum.uniq()
+
+  defp collect_horizons({:call, :unchanged_for?, [{:fact, segments}, {:lit, ms}]}),
+    do: [{segments, ms}]
+
+  defp collect_horizons({:op, _, args}), do: Enum.flat_map(args, &collect_horizons/1)
+  defp collect_horizons({:call, _, args}), do: Enum.flat_map(args, &collect_horizons/1)
+  defp collect_horizons({:list, items}), do: Enum.flat_map(items, &collect_horizons/1)
+  defp collect_horizons(_), do: []
+
   # --- parsing --------------------------------------------------------------
 
   defp parse(source) do
@@ -203,6 +226,44 @@ defmodule Merlin.Expr do
 
   defp check({op, _meta, args}) when op in @operators and is_list(args) do
     with {:ok, checked} <- check_all(args), do: {:ok, {:op, op, checked}}
+  end
+
+  # `unchanged_for?` is the one builtin whose first argument is a PATH rather
+  # than a value, and whose second is a DURATION rather than an expression.
+  #
+  # The path, because the question is "when did this fact last change", and a
+  # value cannot answer it -- by the time `env.read` has run, the only thing
+  # left is what the fact says now. The IR keeps `{:fact, segments}` intact
+  # inside a call, so nothing new is needed to carry it; `build/1` simply
+  # declines to compile that argument into a read.
+  #
+  # The duration, because `{15, :minute}` is a two-tuple, which `check/1`
+  # refuses as forbidden syntax like every other tuple -- correctly, since a
+  # tuple has no meaning in an expression. So it is resolved HERE, at compile
+  # time, through the same `Machine.to_ms/1` that `hold: {:true_for, _}` uses,
+  # and what reaches the closure is milliseconds. A bad duration is a config
+  # error at boot rather than a rule that never fires.
+  defp check({:unchanged_for?, meta, [path_ast, duration]}) do
+    with {:ok, checked} <- check(path_ast) do
+      case checked do
+        {:fact, segments} ->
+          case Merlin.Machine.to_ms(duration) do
+            {:ok, ms} when ms > 0 ->
+              {:ok, {:call, :unchanged_for?, [{:fact, segments}, {:lit, ms}]}}
+
+            # Zero would be true the instant after any change and is never what
+            # anybody meant; refusing it is cheaper than debugging it.
+            {:ok, 0} ->
+              {:error, {:unchanged_for_zero, line(meta)}}
+
+            {:error, _} ->
+              {:error, {:unchanged_for_duration, Macro.to_string(duration), line(meta)}}
+          end
+
+        _ ->
+          {:error, {:unchanged_for_path, Macro.to_string(path_ast), line(meta)}}
+      end
+    end
   end
 
   # Builtins.
@@ -402,6 +463,26 @@ defmodule Merlin.Expr do
     end
   end
 
+  # Compiled against `unchanged_ms` rather than `read`, and the path argument is
+  # never built into a closure -- see the check clause above.
+  #
+  # IGNORANCE PROPAGATES, deliberately, and this is the asymmetry the issue
+  # asked us to pick a side on. `unknown?/1` ANSWERS about ignorance; this one
+  # PASSES IT ON. A fact that is stale, or has never arrived, has no honest
+  # answer to "how long since it changed" -- absent is not unchanged -- and
+  # returning `false` would say "it is moving fine", which is the one reading
+  # that could keep a machine running against dead feedback. Returning
+  # `:unknown` instead lands on the existing rule that ignorance stops things
+  # and starts nothing, so no second asymmetry is added to the language.
+  defp build({:call, :unchanged_for?, [{:fact, segments}, {:lit, ms}]}) do
+    fn env ->
+      case env.unchanged_ms.(segments) do
+        :unknown -> :unknown
+        elapsed when is_integer(elapsed) -> elapsed > ms
+      end
+    end
+  end
+
   defp build({:call, impl, args}) do
     funs = Enum.map(args, &build/1)
     Merlin.Expr.Builtins.build(impl, funs)
@@ -469,8 +550,24 @@ defmodule Merlin.Expr do
       read: Map.get(env, :read, &default_read/1),
       trigger: Map.get(env, :trigger, %{}),
       locals: Map.get(env, :locals, %{}),
-      group: Map.get(env, :group, fn _ -> [] end)
+      group: Map.get(env, :group, fn _ -> [] end),
+      unchanged_ms: Map.get(env, :unchanged_ms, &default_unchanged_ms/1)
     }
+  end
+
+  # The clock lives here rather than in the closure so that the whole predicate
+  # is testable by handing `eval/2` an `unchanged_ms` of its own, the same way
+  # `read` is substituted today.
+  defp default_unchanged_ms(path) do
+    case Merlin.World.fetch(path) do
+      {:ok, fact} ->
+        if Merlin.Fact.stale?(fact),
+          do: :unknown,
+          else: System.monotonic_time(:millisecond) - fact.changed_at
+
+      :error ->
+        :unknown
+    end
   end
 
   defp default_read(path) do

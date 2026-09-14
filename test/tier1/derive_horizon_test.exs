@@ -134,4 +134,75 @@ defmodule Merlin.DeriveHorizonTest do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # `unchanged_for?` is the same lesson one step further on. Staleness needed a
+  # wake-up because a source going quiet produces no change; this needs one
+  # because a source that keeps reporting the SAME VALUE produces no change
+  # either. Every test below writes its input and then either touches nothing
+  # or refreshes it with a value that is deliberately identical.
+  describe "a fact that has stopped moving" do
+    defp start_unchanged(id, out, ms) do
+      spec = %{id: id, kind: :expr, out: out, compute: "unchanged_for?(#{id}.temp, #{ms})"}
+      {:ok, pid} = Derive.Expr.start_link(spec)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      pid
+    end
+
+    test "becomes true with no write at all", %{id: id, input: input, out: out} do
+      World.put(input, 25.0)
+      start_unchanged(id, out, 300)
+      Process.sleep(30)
+      assert World.get(out) == false
+
+      # Nothing is written from here on. This sleep is the entire stimulus.
+      Process.sleep(450)
+
+      assert World.get(out) == true,
+             "the input stopped moving and the derive never noticed -- nothing " <>
+               "re-evaluated it, because nothing changed"
+    end
+
+    # THE STUCK-SENSOR CASE, and the reason staleness cannot cover it. A sensor
+    # wedged at a constant still heartbeats, so observed_at keeps moving and the
+    # fact is never stale. changed_at does not move, and that is what this reads.
+    test "a refresh with the SAME value does not reset it", %{id: id, input: input, out: out} do
+      World.put(input, 25.0, stale_after: 10_000)
+      start_unchanged(id, out, 300)
+
+      # Three heartbeats carrying an identical reading, as a stuck sensor sends.
+      for _ <- 1..3 do
+        Process.sleep(120)
+        World.put(input, 25.0, stale_after: 10_000)
+      end
+
+      assert World.get(out) == true,
+             "an identical re-report was treated as movement, which is exactly " <>
+               "how a wedged sensor hides from a staleness check"
+    end
+
+    test "a real change resets it", %{id: id, input: input, out: out} do
+      World.put(input, 25.0)
+      start_unchanged(id, out, 300)
+      Process.sleep(400)
+      assert World.get(out) == true
+
+      World.put(input, 25.5)
+      Process.sleep(50)
+      assert World.get(out) == false, "a genuine change must restart the clock"
+
+      Process.sleep(400)
+      assert World.get(out) == true, "and the horizon must be re-armed after it"
+    end
+
+    # Ignorance propagates rather than being answered: a stale fact has no
+    # honest answer, and `true` here would be an accusation on no evidence.
+    test "a stale input reads :unknown, not true", %{id: id, input: input, out: out} do
+      World.put(input, 25.0, stale_after: 100)
+      start_unchanged(id, out, 300)
+      Process.sleep(450)
+
+      assert World.get(out) == :unknown,
+             "a fact past its own horizon was reported as having stopped moving"
+    end
+  end
 end

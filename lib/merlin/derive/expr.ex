@@ -86,7 +86,7 @@ defmodule Merlin.Derive.Expr do
   # the timer: the point of a sustained-for window is that the condition is
   # still true NOW, not that it was true when the clock started.
   def handle_info({:hold_elapsed, ref}, %{pending_ref: ref} = state) do
-    env = %{read: &read/1, group: Groups.resolver()}
+    env = %{read: &read/1, group: Groups.resolver(), unchanged_ms: &unchanged_ms/1}
 
     if Expr.eval(state.expr, env) == true do
       World.put(state.out_path, true, source: {:derive, state.id})
@@ -158,7 +158,7 @@ defmodule Merlin.Derive.Expr do
   defp arm_horizon(state) do
     now = System.monotonic_time(:millisecond)
 
-    soonest =
+    stale_horizons =
       state.expr
       |> Expr.deps()
       |> Enum.flat_map(fn path ->
@@ -171,7 +171,33 @@ defmodule Merlin.Derive.Expr do
             []
         end
       end)
-      |> Enum.min(fn -> nil end)
+
+    # The same trick one step further on: `unchanged_for?(p, N)` becomes true at
+    # `changed_at + N` with no write to announce it, so it needs its own wake-up
+    # or the derive sleeps through the very condition it exists to notice.
+    #
+    # A stale fact contributes nothing here. The predicate propagates :unknown
+    # while stale, so the moment worth waking for is the moment it GOES stale --
+    # which the staleness horizon above already schedules.
+    unchanged_horizons =
+      state.expr
+      |> Expr.horizons()
+      |> Enum.flat_map(fn {path, ms} ->
+        case World.fetch(path) do
+          {:ok, %Fact{changed_at: at} = fact} ->
+            if Fact.stale?(fact, now) do
+              []
+            else
+              remaining = at + ms - now
+              if remaining > 0, do: [remaining], else: []
+            end
+
+          _ ->
+            []
+        end
+      end)
+
+    soonest = Enum.min(stale_horizons ++ unchanged_horizons, fn -> nil end)
 
     case soonest do
       nil ->
@@ -187,13 +213,28 @@ defmodule Merlin.Derive.Expr do
   end
 
   defp evaluate(state) do
-    Expr.eval(state.expr, %{read: &read/1, group: Groups.resolver()})
+    Expr.eval(state.expr, %{read: &read/1, group: Groups.resolver(), unchanged_ms: &unchanged_ms/1})
   end
 
   defp read(path) do
     case World.fetch(path) do
       {:ok, fact} -> if Fact.stale?(fact), do: :unknown, else: fact.value
       :error -> :unknown
+    end
+  end
+
+  # Companion to `read/1`, and stale for the same reason it is: a fact past its
+  # horizon has no honest answer to "how long since it changed", so ignorance is
+  # propagated here rather than in the expression, keeping BOTH staleness
+  # decisions on this one line of the read path.
+  defp unchanged_ms(path) do
+    case World.fetch(path) do
+      {:ok, fact} ->
+        now = System.monotonic_time(:millisecond)
+        if Fact.stale?(fact, now), do: :unknown, else: now - fact.changed_at
+
+      :error ->
+        :unknown
     end
   end
 end
