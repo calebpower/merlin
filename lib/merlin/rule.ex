@@ -60,6 +60,9 @@ defmodule Merlin.Rule do
   @type action ::
           {:set_group, atom(), term() | {:expr, binary()}}
           | {:publish, binary(), term()}
+          | {:publish, binary(), term(), keyword()}
+          | {:publish_fact, binary(), Merlin.Path.t()}
+          | {:publish_fact, binary(), Merlin.Path.t(), keyword()}
           | {:set_fact, Merlin.Path.t(), term() | {:expr, binary()}}
           | {:log, atom(), binary() | {:expr, binary()}}
           | {:notify, atom(), binary() | {:expr, binary()}}
@@ -208,6 +211,23 @@ defmodule Merlin.Rule do
     with {:ok, p} <- compile_value(payload), do: {:ok, {:publish, topic, p}}
   end
 
+  # PUBLISH OPTIONS, AND THEY ARE CHECKED HERE SO A TYPO IS A REFUSAL TO START.
+  # `:retain` is the one that matters: an unretained message is an EDGE, and a
+  # reader that was not listening when it went out never learns the value, while
+  # a retained one is replayed to every subscriber on connect. Any aggregate
+  # merlin publishes for something else to read wants it. `MQTT.Client.publish/3`
+  # has carried both options all along; nothing from a config could reach them.
+  #
+  # Validated rather than passed through, because the broker's answer to a bad
+  # option is to drop the message, and a publish that silently never arrives is
+  # the failure this project keeps paying for.
+  defp compile_action({:publish, topic, payload, opts}) when is_binary(topic) do
+    with {:ok, checked} <- publish_opts(opts),
+         {:ok, p} <- compile_value(payload) do
+      {:ok, {:publish, topic, p, checked}}
+    end
+  end
+
   defp compile_action({:set_fact, path, value}) when is_list(path) do
     with {:ok, v} <- compile_value(value), do: {:ok, {:set_fact, path, v}}
   end
@@ -221,7 +241,51 @@ defmodule Merlin.Rule do
     with {:ok, m} <- compile_value(message), do: {:ok, {:log, level, m}}
   end
 
+  # PUBLISH A FACT, WITH THE TWO TIMES THAT MAKE IT A LEVEL RATHER THAN A BLIP.
+  # A `{:publish, _, _, _}` payload is a compiled VALUE, and a value cannot reach
+  # `observed_at` or `changed_at` -- they are not readable by an expression at
+  # all. So "tell the outside world what this fact says, and when it was last
+  # confirmed, and when it last changed" had no spelling. This is it.
+  #
+  # The PATH is taken, not a value, for the same reason `unchanged_for?` takes
+  # one: the question is about the fact's history, and by the time a read has
+  # happened the only thing left is what it says now.
+  defp compile_action({:publish_fact, topic, path}) when is_binary(topic) and is_list(path),
+    do: compile_action({:publish_fact, topic, path, []})
+
+  defp compile_action({:publish_fact, topic, path, opts})
+       when is_binary(topic) and is_list(path) and path != [] do
+    with {:ok, checked} <- publish_opts(opts), do: {:ok, {:publish_fact, topic, path, checked}}
+  end
+
   defp compile_action(other), do: {:error, {:bad_action, other}}
+
+  # Only the two the transport actually honours, and nothing else: an unknown
+  # key is a typo, and accepting it would mean a config that reads as though it
+  # asked for retention and did not get it.
+  defp publish_opts(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.keys(opts) -- [:qos, :retain] do
+        [] -> check_qos_and_retain(opts)
+        unknown -> {:error, {:unknown_publish_opts, unknown}}
+      end
+    else
+      {:error, {:publish_opts_not_a_keyword_list, opts}}
+    end
+  end
+
+  defp publish_opts(other), do: {:error, {:publish_opts_not_a_keyword_list, other}}
+
+  defp check_qos_and_retain(opts) do
+    qos = Keyword.get(opts, :qos, 0)
+    retain = Keyword.get(opts, :retain, false)
+
+    cond do
+      qos not in [0, 1, 2] -> {:error, {:bad_qos, qos}}
+      not is_boolean(retain) -> {:error, {:bad_retain, retain}}
+      true -> {:ok, opts}
+    end
+  end
 
   @doc "Compile an action parameter: a literal, or `{:expr, source}`."
   @spec compile_value(term()) :: {:ok, term()} | {:error, term()}

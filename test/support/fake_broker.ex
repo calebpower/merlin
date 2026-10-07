@@ -72,6 +72,18 @@ defmodule Merlin.Test.FakeBroker do
   @spec clear_published(pid()) :: :ok
   def clear_published(pid), do: GenServer.call(pid, :clear_published)
 
+  @doc """
+  What the broker is holding, topic => payload.
+
+  Retention was modelled here from the start and could only be observed
+  INDIRECTLY, by reconnecting and watching the replay arrive. That is not
+  observable for a publish of merlin's own: `MQTT.Connection` opens a settle
+  window before it subscribes, deliberately, so the replay never reaches an
+  outward effect. Asking the broker what it kept is the only direct question.
+  """
+  @spec retained(pid()) :: %{binary() => binary()}
+  def retained(pid), do: GenServer.call(pid, :retained)
+
   @doc "Seed a retained message without delivering it, as a broker that was already running would hold."
   @spec preload_retained(pid(), binary(), binary()) :: :ok
   def preload_retained(pid, topic, payload),
@@ -108,6 +120,8 @@ defmodule Merlin.Test.FakeBroker do
 
     {:reply, :ok, state}
   end
+
+  def handle_call(:retained, _from, state), do: {:reply, state.retained, state}
 
   def handle_call(:connect, _from, state) do
     send(state.owner, {:mqtt_connection, :up})
