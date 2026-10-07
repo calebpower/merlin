@@ -61,6 +61,8 @@ defmodule Merlin.Rule do
           {:set_group, atom(), term() | {:expr, binary()}}
           | {:publish, binary(), term()}
           | {:publish, binary(), term(), keyword()}
+          | {:publish_fact, binary(), Merlin.Path.t()}
+          | {:publish_fact, binary(), Merlin.Path.t(), keyword()}
           | {:set_fact, Merlin.Path.t(), term() | {:expr, binary()}}
           | {:log, atom(), binary() | {:expr, binary()}}
           | {:notify, atom(), binary() | {:expr, binary()}}
@@ -237,6 +239,23 @@ defmodule Merlin.Rule do
   defp compile_action({:log, level, message})
        when level in [:debug, :info, :warning, :error] do
     with {:ok, m} <- compile_value(message), do: {:ok, {:log, level, m}}
+  end
+
+  # PUBLISH A FACT, WITH THE TWO TIMES THAT MAKE IT A LEVEL RATHER THAN A BLIP.
+  # A `{:publish, _, _, _}` payload is a compiled VALUE, and a value cannot reach
+  # `observed_at` or `changed_at` -- they are not readable by an expression at
+  # all. So "tell the outside world what this fact says, and when it was last
+  # confirmed, and when it last changed" had no spelling. This is it.
+  #
+  # The PATH is taken, not a value, for the same reason `unchanged_for?` takes
+  # one: the question is about the fact's history, and by the time a read has
+  # happened the only thing left is what it says now.
+  defp compile_action({:publish_fact, topic, path}) when is_binary(topic) and is_list(path),
+    do: compile_action({:publish_fact, topic, path, []})
+
+  defp compile_action({:publish_fact, topic, path, opts})
+       when is_binary(topic) and is_list(path) and path != [] do
+    with {:ok, checked} <- publish_opts(opts), do: {:ok, {:publish_fact, topic, path, checked}}
   end
 
   defp compile_action(other), do: {:error, {:bad_action, other}}

@@ -33,6 +33,7 @@ defmodule Merlin.Effects do
   @type effect ::
           {:set_group, atom(), term()}
           | {:publish, binary(), binary(), keyword()}
+          | {:publish_fact, binary(), Merlin.Path.t(), keyword()}
           | {:set_fact, Merlin.Path.t(), term()}
           | {:log, atom(), binary()}
           | {:notify, atom(), binary()}
@@ -155,6 +156,9 @@ defmodule Merlin.Effects do
   def describe({:set_group, group, value}), do: "set group #{group} -> #{inspect(value)}"
   def describe({:publish, topic, payload, _}), do: "publish #{topic} #{inspect(payload)}"
 
+  def describe({:publish_fact, topic, path, _}),
+    do: "publish fact #{Enum.join(path, ".")} -> #{topic}"
+
   def describe({:set_fact, path, value}),
     do: "set #{Merlin.Path.to_string(path)} -> #{inspect(value)}"
 
@@ -195,6 +199,14 @@ defmodule Merlin.Effects do
       {:ok, {:publish, topic, to_payload(p), opts}}
     end
   end
+
+  # NOTHING TO RESOLVE, AND THE FACT IS READ AT PERFORM TIME ON PURPOSE. A rule
+  # may be evaluated and its effects performed a moment apart; publishing what
+  # the fact said at evaluation would put a value on a RETAINED topic that the
+  # world has already moved past, and a retained stale value is the longest-lived
+  # kind of wrong.
+  defp resolve_action({:publish_fact, topic, path, opts}, _env, _groups),
+    do: {:ok, {:publish_fact, topic, path, opts}}
 
   defp resolve_action({:set_fact, path, v}, env, _groups) do
     with {:ok, resolved} <- value(v, env), do: {:ok, {:set_fact, path, resolved}}
@@ -254,6 +266,17 @@ defmodule Merlin.Effects do
     end
   end
 
+  defp do_perform({:publish_fact, topic, path, opts}, source, _cause) do
+    case Merlin.MQTT.Connection.publish(topic, fact_payload(path), opts) do
+      :ok ->
+        :performed
+
+      {:error, reason} ->
+        Logger.warning("#{source_label(source)}: publish fact #{topic} failed: #{inspect(reason)}")
+        {:failed, reason}
+    end
+  end
+
   defp do_perform({:set_fact, path, value}, source, cause) do
     # The causal opts are what make the writer's depth guard enforceable. A
     # rule reacting to a change writes at that change's depth + 1, so a cycle
@@ -309,6 +332,70 @@ defmodule Merlin.Effects do
   defp rule_source(rule), do: {:rule, rule}
 
   @doc false
+  # WHAT A PUBLISHED FACT CARRIES, AND WHY IT IS AGES AND NOT TIMESTAMPS.
+  #
+  # `changed_at` and `observed_at` are MONOTONIC (see `Merlin.Fact`), chosen so
+  # an NTP step cannot make a fact appear to arrive from the future -- and
+  # meaningless outside this VM, so something has to cross that boundary.
+  # `Merlin.Snapshot` crosses it with per-fact AGES plus one wall stamp, and this
+  # does the same, for a reason worth keeping written down:
+  #
+  # The first version of this published derived absolutes, `as_of` and `since`.
+  # They JITTER. Each publication re-derives them by subtracting a monotonic age
+  # from a freshly read wall clock, and the two clocks are read at slightly
+  # different instants, so two messages about an UNCHANGED fact disagreed about
+  # when it last changed -- by 0.4 ms in the test that caught it. A reader
+  # diffing `since` to spot an edge would see edges that never happened.
+  #
+  # Ages do not have that property: while a value holds, `changed_ago_ms` only
+  # grows, and a DROP is exactly the edge. So:
+  #
+  # The value's wire form is Jason's: an atom renders as its own name and a
+  # boolean as a boolean, which is what merlin's vocabulary of states wants. An
+  # earlier draft stringified atoms by hand here; it was redundant, a mutation
+  # control proved it could be removed without changing a single byte, and dead
+  # weight that looks load-bearing is worse than none.
+  #
+  #   value            what the fact says, or "unknown" if it is stale, absent,
+  #                    or genuinely unknown -- three cases a reader must not be
+  #                    able to tell apart, because none of them is an answer
+  #   at               when this MESSAGE was published, wall clock. Load-bearing
+  #                    on a RETAINED topic: the broker may replay it hours later
+  #                    and without its own stamp there is no telling a fresh
+  #                    level from one held since yesterday. Absolute here is
+  #                    safe -- it describes the message, not a fact's history,
+  #                    so nothing compares it across publications.
+  #   observed_ago_ms  how long since the value was last confirmed
+  #   changed_ago_ms   how long since it last changed; the edge, for a reader
+  #                    that was not listening when it happened
+  #
+  # Both ages are null when the value is not an answer: a stale fact has no
+  # honest "how long since it changed", which is the rule `unchanged_for?`
+  # already follows.
+  @spec fact_payload(Merlin.Path.t()) :: binary()
+  def fact_payload(path) do
+    now = System.monotonic_time(:millisecond)
+
+    body =
+      case World.fetch(path) do
+        {:ok, fact} ->
+          if Merlin.Fact.stale?(fact, now) or fact.value == :unknown do
+            %{value: "unknown", observed_ago_ms: nil, changed_ago_ms: nil}
+          else
+            %{
+              value: fact.value,
+              observed_ago_ms: max(now - fact.observed_at, 0),
+              changed_ago_ms: max(now - fact.changed_at, 0)
+            }
+          end
+
+        :error ->
+          %{value: "unknown", observed_ago_ms: nil, changed_ago_ms: nil}
+      end
+
+    Jason.encode!(Map.put(body, :at, DateTime.to_iso8601(DateTime.utc_now())))
+  end
+
   @spec source_suffix(Merlin.Effects.Report.source()) :: binary()
   def source_suffix(nil), do: ""
   def source_suffix({:rule, rule}), do: " (#{rule})"

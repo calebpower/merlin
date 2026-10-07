@@ -644,5 +644,64 @@ defmodule Merlin.TransportTest do
 
       assert Merlin.Test.FakeBroker.retained(broker) == %{}
     end
+
+    # THE WHOLE POINT, ASSEMBLED: a derived fact goes out retained, so a reader
+    # that was not listening still gets the level when it subscribes. This is
+    # the shape `merlin/home/presence` needs -- the value, the message's own
+    # stamp, and the two ages -- driven through the real Effects and the real
+    # Connection rather than asserted on a payload builder in isolation.
+    test "a fact publishes retained, carrying its value and both ages" do
+      {pid, broker} = start_connection()
+
+      Merlin.Test.FakeBroker.connect(broker)
+      sync(pid)
+      # AFTER the connect, not before: connecting opens a settle window of its
+      # own, and Effects honours it where a bare Connection.publish does not.
+      Merlin.Settle.finish()
+
+      path = [:test, "#{System.unique_integer([:positive])}", :level]
+      Merlin.World.put(path, :active)
+
+      assert [{:publish_fact, _, _, _}] =
+               Merlin.Effects.perform([{:publish_fact, "merlin/home/presence", path, [retain: true]}])
+
+      sync(pid)
+
+      assert %{"merlin/home/presence" => json} = Merlin.Test.FakeBroker.retained(broker)
+      body = Jason.decode!(json)
+      assert body["value"] == "active"
+      assert is_integer(body["changed_ago_ms"])
+      assert {:ok, _, _} = DateTime.from_iso8601(body["at"])
+    end
+
+    # READ AT PERFORM, NOT AT RESOLVE, and this arm is why that sentence is in
+    # the source rather than only in my head. A rule may be evaluated and its
+    # effects performed a moment apart; building the payload at resolve would
+    # put the older value on a RETAINED topic, where a wrong value outlives
+    # every other kind. A mutation control that moved the read to resolve passed
+    # the whole suite until this existed.
+    test "the value published is the one at PERFORM time, not at resolve time" do
+      {pid, broker} = start_connection()
+
+      Merlin.Test.FakeBroker.connect(broker)
+      sync(pid)
+      Merlin.Settle.finish()
+
+      path = [:test, "#{System.unique_integer([:positive])}", :level]
+      Merlin.World.put(path, :quiet)
+
+      env = %{read: fn _ -> :unknown end, trigger: %{}, locals: %{}, group: fn _ -> [] end}
+
+      {:ok, effects} =
+        Merlin.Effects.resolve([{:publish_fact, "merlin/home/presence", path, [retain: true]}], env, %{})
+
+      # The world moves in the gap.
+      Merlin.World.put(path, :active)
+      Merlin.Effects.perform(effects)
+      sync(pid)
+
+      assert %{"merlin/home/presence" => json} = Merlin.Test.FakeBroker.retained(broker)
+      assert Jason.decode!(json)["value"] == "active"
+    end
   end
 end
