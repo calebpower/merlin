@@ -79,6 +79,18 @@ defmodule Merlin.Expr do
     {:abs, 1} => :abs_
   }
 
+  # WHICH ARGUMENT OF A BUILTIN NAMES A GROUP, by index. A group is written as
+  # an atom literal -- `all_eq?(:living_room_lamps, :on)` -- and until now that
+  # literal was indistinguishable in the IR from any other atom, which is why
+  # `deps/1` returned [] for every group expression: nothing could tell that
+  # `:living_room_lamps` meant "these four facts". A derive over such an
+  # expression therefore subscribed to NOTHING and never re-evaluated
+  # (`Derive.Expr` watches exactly `deps/1`). Rule ACTIONS were unaffected,
+  # which is the only reason the lamp toggle works, so this was latent rather
+  # than broken. Making group-ness explicit in the IR as `{:group, name}` is
+  # what lets deps and horizons see through to the members.
+  @group_arg %{all_eq?: 0, any_eq?: 0, count_eq: 0}
+
   @scoped_roots [:local, :trigger]
 
   @doc "The number of builtins currently defined. Asserted against the budget in tier 1."
@@ -146,7 +158,19 @@ defmodule Merlin.Expr do
 
   @doc "The fact paths this expression reads. Used to derive subscriptions automatically."
   @spec deps(t()) :: [Merlin.Path.t()]
-  def deps(%__MODULE__{deps: deps}), do: deps
+  def deps(%__MODULE__{deps: deps, node: node}), do: Enum.uniq(deps ++ group_deps(node))
+
+  # RESOLVED HERE AND NOT IN `compile/1`, deliberately. Membership is declared
+  # config, and an expression can be compiled before the groups it names are
+  # loaded; baking the members into the struct at compile time would silently
+  # yield [] for anything compiled early. `deps/1` is called by `Derive.Expr`
+  # at init, after the config is up, so the lookup is correct there and costs
+  # one map fetch.
+  defp group_deps({:group, name}), do: Merlin.Groups.members(name)
+  defp group_deps({:op, _, args}), do: Enum.flat_map(args, &group_deps/1)
+  defp group_deps({:call, _, args}), do: Enum.flat_map(args, &group_deps/1)
+  defp group_deps({:list, items}), do: Enum.flat_map(items, &group_deps/1)
+  defp group_deps(_), do: []
 
   @doc """
   Every `{path, ms}` this expression can become true by the mere PASSING of time.
@@ -163,6 +187,12 @@ defmodule Merlin.Expr do
 
   defp collect_horizons({:call, :unchanged_for?, [{:fact, segments}, {:lit, ms}]}),
     do: [{segments, ms}]
+
+  # Every member gets the same horizon: the fold can change answer when ANY of
+  # them crosses N, so a timer is owed for each. Resolved at call time for the
+  # reason `group_deps/1` is.
+  defp collect_horizons({:call, :unchanged_for?, [{:group, name}, {:lit, ms}]}),
+    do: for(path <- Merlin.Groups.members(name), do: {path, ms})
 
   defp collect_horizons({:op, _, args}), do: Enum.flat_map(args, &collect_horizons/1)
   defp collect_horizons({:call, _, args}), do: Enum.flat_map(args, &collect_horizons/1)
@@ -246,6 +276,17 @@ defmodule Merlin.Expr do
   defp check({:unchanged_for?, meta, [path_ast, duration]}) do
     with {:ok, checked} <- check(path_ast) do
       case checked do
+        # A GROUP, folded as AND over its members: "nothing in this set has
+        # moved for N". `not` on it is "something moved", which is the question
+        # an aggregate over a set of contacts actually asks. Written the same
+        # way every other group argument is, as an atom literal.
+        {:lit, name} when is_atom(name) and not is_boolean(name) and not is_nil(name) ->
+          case Merlin.Machine.to_ms(duration) do
+            {:ok, ms} when ms > 0 -> {:ok, {:call, :unchanged_for?, [{:group, name}, {:lit, ms}]}}
+            {:ok, 0} -> {:error, {:unchanged_for_zero, line(meta)}}
+            {:error, _} -> {:error, {:unchanged_for_duration, Macro.to_string(duration), line(meta)}}
+          end
+
         {:fact, segments} ->
           case Merlin.Machine.to_ms(duration) do
             {:ok, ms} when ms > 0 ->
@@ -270,7 +311,8 @@ defmodule Merlin.Expr do
   defp check({name, meta, args}) when is_atom(name) and is_list(args) do
     case Map.fetch(@builtins, {name, length(args)}) do
       {:ok, impl} ->
-        with {:ok, checked} <- check_all(args), do: {:ok, {:call, impl, checked}}
+        with {:ok, checked} <- check_all(args),
+             do: {:ok, {:call, impl, mark_group(impl, checked)}}
 
       :error ->
         if Map.has_key?(@builtins, name) or Enum.any?(@builtins, fn {{n, _}, _} -> n == name end) do
@@ -389,6 +431,26 @@ defmodule Merlin.Expr do
       else: []
   end
 
+  # Rewrite the group argument of a group builtin from a bare atom literal into
+  # `{:group, name}`. Anything else in that position is left alone: a FACT there
+  # is the pre-existing shape where a fact's value names the group, and this
+  # change is not the place to rule on it.
+  defp mark_group(impl, args) do
+    case Map.fetch(@group_arg, impl) do
+      {:ok, index} ->
+        List.update_at(args, index, fn
+          {:lit, name} when is_atom(name) and not is_boolean(name) and not is_nil(name) ->
+            {:group, name}
+
+          other ->
+            other
+        end)
+
+      :error ->
+        args
+    end
+  end
+
   defp extract_deps({:fact, segments}), do: [segments]
   defp extract_deps({:op, _, args}), do: Enum.flat_map(args, &extract_deps/1)
   defp extract_deps({:call, _, args}), do: Enum.flat_map(args, &extract_deps/1)
@@ -405,6 +467,11 @@ defmodule Merlin.Expr do
   end
 
   defp build({:fact, segments}), do: fn env -> env.read.(segments) end
+
+  # A group evaluates to its own name. That keeps `Builtins.group_values/3`
+  # exactly as it was -- it calls the argument and hands the result to
+  # `env.group` -- so all_eq?, any_eq? and count_eq need no change at all.
+  defp build({:group, name}), do: fn _env -> name end
 
   defp build({:scoped, :local, key}), do: fn env -> Map.get(env.locals, key, :unknown) end
 
@@ -479,6 +546,51 @@ defmodule Merlin.Expr do
       case env.unchanged_ms.(segments) do
         :unknown -> :unknown
         elapsed when is_integer(elapsed) -> elapsed > ms
+      end
+    end
+  end
+
+  # THE GROUP FOLD IS A THREE-VALUED `and` OVER THE MEMBERS, and the order of the
+  # cond is the whole semantics:
+  #
+  #   any member false  -> false      something in the set moved within N, and
+  #                                   that is decisive however many other
+  #                                   members are dark (`false and :unknown` is
+  #                                   false -- see the Kleene table above)
+  #   else any unknown  -> :unknown   nothing seen to move, but a member is
+  #                                   stale, so "nothing moved" cannot be said
+  #   else              -> true       every member has been still for N
+  #
+  # Which is what an aggregate over contacts needs: one honest sensor that moved
+  # PROVES movement, while a blind sensor can only cost us the quiet answer, never
+  # manufacture one. NOTE it differs from `group_pred/3`'s order, which answers
+  # :unknown as soon as any member is unknown. That is the stricter reading and
+  # it is not touched here; this fold is an `and` and false is decisive in an
+  # `and`.
+  #
+  # An empty group is :unknown, not `true`: "nothing in an empty set has moved"
+  # is vacuously true and would be a typo'd group name reading as a quiet house.
+  # Same rule, same reason, as `group_pred/3`.
+  defp build({:call, :unchanged_for?, [{:group, name}, {:lit, ms}]}) do
+    fn env ->
+      case env.group.(name) do
+        [] ->
+          :unknown
+
+        paths ->
+          values =
+            Enum.map(paths, fn path ->
+              case env.unchanged_ms.(path) do
+                :unknown -> :unknown
+                elapsed when is_integer(elapsed) -> elapsed > ms
+              end
+            end)
+
+          cond do
+            Enum.any?(values, &(&1 == false)) -> false
+            Enum.any?(values, &(&1 == :unknown)) -> :unknown
+            true -> true
+          end
       end
     end
   end

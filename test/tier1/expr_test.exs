@@ -520,6 +520,81 @@ defmodule Merlin.ExprTest do
       assert ev("unchanged_for?(missing.thing, 1000)", with_elapsed(%{})) == :unknown
     end
 
+    # --- the GROUP form -----------------------------------------------------
+    #
+    # An aggregate over a SET of contacts cannot be written as a path: the
+    # members are declared config, and one of merlin's own sources builds its
+    # paths from a {:capture, _}, which puts a STRING in the middle segment that
+    # no dotted expression can name. So the horizon has to be askable of a
+    # group.
+    defp doors_env(map) do
+      %{
+        group: fn :all_doors -> [[:door, "front", :contact], [:door, "office", :contact]] end,
+        unchanged_ms: fn path -> Map.get(map, path, :unknown) end
+      }
+    end
+
+    test "a group is true only when EVERY member has been still for longer than the duration" do
+      still = %{[:door, "front", :contact] => 1001, [:door, "office", :contact] => 5000}
+      assert ev("unchanged_for?(:all_doors, 1000)", doors_env(still)) == true
+    end
+
+    test "one member that moved makes the group false, and `not` of it is the activity signal" do
+      moved = %{[:door, "front", :contact] => 999, [:door, "office", :contact] => 5000}
+      assert ev("unchanged_for?(:all_doors, 1000)", doors_env(moved)) == false
+      assert ev("not unchanged_for?(:all_doors, 1000)", doors_env(moved)) == true
+    end
+
+    # THE TWO ASYMMETRIC CASES, and they are the reason the fold is an `and`
+    # rather than group_pred's unknown-first order. A blind member may cost the
+    # quiet answer; it must never be able to suppress a movement another member
+    # actually saw.
+    test "a member that MOVED beats a member that is dark -- false wins in an `and`" do
+      assert ev("unchanged_for?(:all_doors, 1000)", doors_env(%{[:door, "front", :contact] => 999})) ==
+               false
+    end
+
+    test "all still but one member dark cannot assert quiet: :unknown" do
+      assert ev("unchanged_for?(:all_doors, 1000)", doors_env(%{[:door, "front", :contact] => 5000})) ==
+               :unknown
+    end
+
+    # A typo'd group name resolves to no members. "Nothing in an empty set has
+    # moved" is vacuously true and would read as a quiet house for ever.
+    test "an empty or misspelled group is :unknown, never true" do
+      env = %{group: fn _ -> [] end, unchanged_ms: fn _ -> 9_999_999 end}
+      assert ev("unchanged_for?(:no_such_group, 1000)", env) == :unknown
+    end
+
+    # deps/1 is what Derive.Expr subscribes to. Before this existed it returned
+    # [] for every group expression, so a derive over a group watched NOTHING
+    # and never re-evaluated; only rule actions, fired by their own trigger,
+    # were unaffected.
+    # SEEDED, because `Groups.members/1` reads declared config and an unseeded
+    # test registry answers [] -- which would make both assertions below
+    # `[] == []` and prove nothing. The first draft of these two was exactly
+    # that, and it passed.
+    test "deps/1 and horizons/1 see through a group to its members" do
+      members = [[:door, "front", :contact], [:door, "office", :contact]]
+      Merlin.Config.put(%{groups: %{all_doors: %{id: :all_doors, members: members}}})
+      on_exit(fn -> Merlin.Config.put(%{}) end)
+
+      assert Merlin.Groups.members(:all_doors) == members
+
+      {:ok, e} = Expr.compile("unchanged_for?(:all_doors, {20, :minute})")
+      assert Expr.deps(e) == members
+      assert Expr.horizons(e) == for(m <- members, do: {m, 1_200_000})
+    end
+
+    test "a group argument to all_eq? also contributes its members to deps" do
+      members = [[:lamp, :one, :power], [:lamp, :two, :power]]
+      Merlin.Config.put(%{groups: %{lamps: %{id: :lamps, members: members}}})
+      on_exit(fn -> Merlin.Config.put(%{}) end)
+
+      {:ok, e} = Expr.compile("all_eq?(:lamps, :on)")
+      assert Expr.deps(e) == members
+    end
+
     test "never answers true about a fact it knows nothing about" do
       for ms <- [1, 1000, 86_400_000] do
         refute ev("unchanged_for?(missing.thing, #{ms})", with_elapsed(%{})) == true
