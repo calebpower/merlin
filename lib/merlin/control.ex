@@ -76,6 +76,7 @@ defmodule Merlin.Control do
   @type command ::
           {:set_group, atom(), term()}
           | {:publish, binary(), binary()}
+          | {:publish, binary(), binary(), keyword()}
           | {:set_fact, Merlin.Path.t(), term()}
 
   @doc false
@@ -183,6 +184,19 @@ defmodule Merlin.Control do
       {:error, {:wildcard_topic, topic}}
     else
       {:ok, [{:publish, topic, payload, []}]}
+    end
+  end
+
+  # Same command with options. The wildcard refusal above applies identically:
+  # a pattern is not an address whether or not you asked for retention -- and a
+  # RETAINED publish to a wildcard would be worse, since a broker that accepts
+  # it leaves the bad message behind for every future subscriber.
+  def resolve({:publish, topic, payload, opts})
+      when is_binary(topic) and is_binary(payload) and is_list(opts) do
+    if String.contains?(topic, ["+", "#"]) do
+      {:error, {:wildcard_topic, topic}}
+    else
+      {:ok, [{:publish, topic, payload, opts}]}
     end
   end
 

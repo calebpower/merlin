@@ -604,5 +604,45 @@ defmodule Merlin.TransportTest do
 
       assert [{"test/pong", "pong"}] = Merlin.Test.FakeBroker.published(broker)
     end
+
+    # RETENTION REACHES THE BROKER, which is the half of `retain: true` that
+    # merlin controls. Said precisely, because the obvious stronger arm cannot
+    # be written: a retained message is replayed when a subscription lands, and
+    # `MQTT.Connection` opens a settle window BEFORE it subscribes, on purpose,
+    # so the replay can never produce an outward effect to observe. The first
+    # draft of this test asserted exactly that and failed -- the engine
+    # suppressing the replay is the behaviour the window exists for, not a bug.
+    #
+    # So this asserts what is true and observable: the option travels the whole
+    # path from a config-level action to the transport call, and the broker is
+    # asked to keep the message. What a real broker then does with it is the
+    # broker's contract, not merlin's.
+    test "a publish asking for retention is kept by the broker" do
+      {pid, broker} = start_connection()
+
+      Merlin.Settle.finish()
+      Merlin.Test.FakeBroker.connect(broker)
+      sync(pid)
+
+      assert :ok = Merlin.MQTT.Connection.publish("test/held", "level", retain: true)
+      sync(pid)
+
+      assert Merlin.Test.FakeBroker.retained(broker) == %{"test/held" => "level"}
+    end
+
+    # The discriminator. Without it the arm above passes on a broker that
+    # retained everything, which is the opposite of the property.
+    test "and one that does not ask is not kept" do
+      {pid, broker} = start_connection()
+
+      Merlin.Settle.finish()
+      Merlin.Test.FakeBroker.connect(broker)
+      sync(pid)
+
+      assert :ok = Merlin.MQTT.Connection.publish("test/fleeting", "edge", [])
+      sync(pid)
+
+      assert Merlin.Test.FakeBroker.retained(broker) == %{}
+    end
   end
 end

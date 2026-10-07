@@ -188,6 +188,14 @@ defmodule Merlin.Effects do
     end
   end
 
+  # The options were validated at compile time (`Rule.compile_action/1`), so
+  # they travel verbatim; `do_perform/3` and `MQTT.Connection` already take them.
+  defp resolve_action({:publish, topic, payload, opts}, env, _groups) do
+    with {:ok, p} <- value(payload, env) do
+      {:ok, {:publish, topic, to_payload(p), opts}}
+    end
+  end
+
   defp resolve_action({:set_fact, path, v}, env, _groups) do
     with {:ok, resolved} <- value(v, env), do: {:ok, {:set_fact, path, resolved}}
   end
